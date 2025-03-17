@@ -3,6 +3,7 @@ from hybri import Hybrizone, HybriParams, PolarPoint, AirData, AngleMode, CoordM
 import librosa as lb
 import numpy as np
 import pyaudio as pa
+import time
 
 # main scripts
 HRIR_PATH = "/Users/pm/AcaHub/Coding/BinauralSpatial/data/HRIR-KEMAR_DATASET.h5"
@@ -20,7 +21,7 @@ PARAMS = HybriParams(
         interp_domain=InterpolationDomain.FREQUENCY,
         build_mode=BuildMode.LINEAR,
         chunk_size=CHUNK,
-        interpolation_neighs=3
+        interpolation_neighs=2
 )
 
 SIG, _ = lb.load(AUDIO_PATH, sr=SR)
@@ -47,8 +48,11 @@ def main() -> None:
     stream = PORTAUDIO.open(format=pa.paFloat32, channels=CHANNELS, rate=SR, output=True, frames_per_buffer=CHUNK)
     stream.start_stream()
 
+    current_phi = 0
+    current_theta = 0
     run = True
     mark = 0
+    prev_time = 0
     while True:
         
         try:
@@ -62,12 +66,22 @@ def main() -> None:
             end = min(mark + CHUNK, SIG_LIMIT - 1)
             frame = SIG[mark:end]
 
+            
             # pass current position
-            pos = PolarPoint(rho=1.7, phi=20, theta=60, opt=AngleMode.DEGREE)
+            curr_ele = ((current_phi + 90) % 180)  - 90
+            curr_azi = current_theta % 360
+            pos = PolarPoint(rho=1.7, phi=curr_ele, theta=curr_azi, opt=AngleMode.DEGREE) # bisogna risolvere il problema dei clip in transizioni di posizione
             AURALIZER.set_position(position=pos)
+            
+            if prev_time == 0.0 or time.time() - prev_time > 0.05:
+                current_theta += 15
+                current_phi += 15
+                prev_time = time.time()
+                print(current_phi, current_theta)
+            
 
             # pass current hybrid space params
-            AURALIZER.set_morph_data(direction=0.5, morph_curve=CurveMode.SIGMOID)
+            AURALIZER.set_morph_data(direction=0, morph_curve=CurveMode.LINEAR)
 
             # generates kernels (HRIR and RIR)
             kernels = AURALIZER.get_rir_and_hrir()
@@ -80,11 +94,13 @@ def main() -> None:
                 mark += CHUNK
             else:
                 stream.write(np.zeros((CHUNK, 2), dtype=np.float32).tobytes())
+            time.sleep(1 / SR)
         except KeyboardInterrupt:
             run = False
             AURALIZER.close()
             print("[INFO] Process blocked by user!")
             break
+        
             
     while run:
         pass

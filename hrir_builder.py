@@ -61,7 +61,8 @@ class PolarPoint():
         theta : float
             azimuth (0 <= theta <= 360) in degree
         """
-        
+
+        self.opt = opt
         self.rho = rho
         
         if opt == AngleMode.DEGREE:
@@ -70,6 +71,7 @@ class PolarPoint():
         
         self.phi = phi
         self.theta = theta
+        
     
     def get_cartesian(self, mode: CoordMode) -> CartesianPoint:
         x = 0.0
@@ -378,7 +380,7 @@ class HRIRBuilder():
             interpolator = sp.interpolate.interp1d(x, h, axis=0, kind='linear', fill_value="extrapolate")
             h = interpolator(x + frac_delay)
         
-        filtered = self.__air_absorption_filter(frame=h, distance=rho - original_distance)
+        filtered = self.__air_absorption_filter(frame=h, distance=rho - original_distance) * factor
         # print(factor)
         return filtered * factor
     

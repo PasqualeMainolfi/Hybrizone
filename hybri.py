@@ -4,7 +4,7 @@ from rir_builder import CurveMode, MorpData
 import rir_builder as rib
 from common_modules import np, NDArray
 import scipy
-from threading import Thread, Event
+from threading import Thread, Event, Lock
 from concurrent.futures import ThreadPoolExecutor
 
 
@@ -12,7 +12,7 @@ from queue import Queue
 import time
 
 class HybriParams():
-    def __init__(self, hrir_database: str, rir_database: str, coord_mode: CoordMode, interp_domain: InterpolationDomain, build_mode: BuildMode, chunk_size: int = 1024, interpolation_neighs: int = 3):
+    def __init__(self, hrir_database: str, rir_database: str|None, coord_mode: CoordMode, interp_domain: InterpolationDomain, build_mode: BuildMode, chunk_size: int = 1024, interpolation_neighs: int = 3, sample_rate: float = 44100):
         """
         HYBRIZONE INIT PARAMETERS
 
@@ -20,8 +20,8 @@ class HybriParams():
         ----------
         hrir_database : str
             path to HRIRs .h5 database
-        rir_database : str
-            path to RIRs .h5 database
+        rir_database : str|None
+            path to RIRs .h5 database. If None IR will not applied
         coord_mode : CoordMode
             coordinates mode (see CoordMode)
         interp_domain : InterpDomain
@@ -32,6 +32,8 @@ class HybriParams():
             chunk size in samples for real-time buffering overlap and save. by default, 1024
         interpolation_neighs : int
             how many closest HRIRs in interpolation process. by default, 3 
+        sample_rate : float
+            sample rate in Hz. by default 44100
         """
         
         self.hrir_databse = hrir_database
@@ -41,6 +43,7 @@ class HybriParams():
         self.build_mode = build_mode
         self.chunk_size = chunk_size
         self.interpolation_neighs = interpolation_neighs
+        self.fs = sample_rate
 
 class RTOverlapSaveBufferConvolution():
     def __init__(self, chunk: int):
@@ -49,23 +52,31 @@ class RTOverlapSaveBufferConvolution():
     
     def process(self, x: NDArray[np.float32], kernel: NDArray[np.float32]) -> NDArray[np.float32]:
         convolution = scipy.signal.fftconvolve(x, kernel, mode="full")
-        convolution[:self.buffer.size] += self.buffer
+        max_lenght = min(self.buffer.size, convolution.size - 1)
+        convolution[:max_lenght] += self.buffer[:max_lenght]
         convolved = convolution[:self.chunk]
         self.buffer = convolution[self.chunk:]
         return convolved
 
 class HybriKernels():
-    def __init__(self, rir: NDArray[np.float32], hrir: NDArray[np.float32]):
+    def __init__(self, rir: NDArray[np.float32] | None, hrir: NDArray[np.float32]):
         self.rir = rir
         self.hrir = hrir
 
 class Hybrizone():
+    
+    SOFT_CLIP_SCALE = 1 / 0.707
+    
     def __init__(self, params: HybriParams) -> None:
-        self.hrir_builder = hrb.HRIRBuilder(hrir_database=params.hrir_databse, mode=params.coord_mode, interp_domain=params.interpolation_domain)
-        self.rir_builder = rib.RIRMorpha(rir_database=params.rir_databse)
         self.__params = params
+        self.hrir_builder = hrb.HRIRBuilder(hrir_database=params.hrir_databse, mode=params.coord_mode, interp_domain=params.interpolation_domain)
         
-        self.__rir_buffer = RTOverlapSaveBufferConvolution(chunk=self.__params.chunk_size)
+        self.rir_builder = None
+        self.__rir_buffer = None
+        if self.__params.rir_databse is not None:
+            self.rir_builder = rib.RIRMorpha(rir_database=params.rir_databse)
+            self.__rir_buffer = RTOverlapSaveBufferConvolution(chunk=self.__params.chunk_size)
+        
         self.__hrir_left_buffer = RTOverlapSaveBufferConvolution(chunk=self.__params.chunk_size)
         self.__hrir_right_buffer = RTOverlapSaveBufferConvolution(chunk=self.__params.chunk_size)
         
@@ -79,7 +90,6 @@ class Hybrizone():
         
         self.__space_process_is_alive = Event()
         self.__space_process = None
-        
         
     def close(self) -> None:
         """
@@ -95,7 +105,8 @@ class Hybrizone():
         
         print("[INFO] Free memory")
         self.hrir_builder.close()
-        self.rir_builder.close()
+        if self.rir_builder is not None:
+            self.rir_builder.close()
         print("[INFO] Hybrizone closed!")
     
     def process_frame(self, frame: NDArray[np.float32], kernels: HybriKernels) -> NDArray[np.float32]:
@@ -115,53 +126,83 @@ class Hybrizone():
             frame processed
         """
         
-        mono_rir = self.__rir_buffer.process(x=frame, kernel=kernels.rir)
-        
+        mono = frame
+        if kernels.rir is not None:
+            mono = self.__rir_buffer.process(x=frame, kernel=kernels.rir)
+            
         with ThreadPoolExecutor(max_workers=2) as convolver:
-            lc = convolver.submit(self.__hrir_left_buffer.process, mono_rir, kernels.hrir[:, 0])
-            lr = convolver.submit(self.__hrir_right_buffer.process, mono_rir, kernels.hrir[:, 1])
+            lc = convolver.submit(self.__hrir_left_buffer.process, mono, kernels.hrir[:, 0])
+            lr = convolver.submit(self.__hrir_right_buffer.process, mono, kernels.hrir[:, 1])
             left_hrir = lc.result()
             right_hrir = lr.result()
-            
-        return np.column_stack((left_hrir, right_hrir)).astype(np.float32)
 
+        convolved = np.column_stack((left_hrir, right_hrir)).astype(np.float32)
+        
+        return np.tanh(convolved * self.SOFT_CLIP_SCALE) / self.SOFT_CLIP_SCALE
+            
     def __start_space_data_process(self) -> None:
         while not self.__space_process_is_alive.is_set():
-            if not self.__ppoints.empty() and not self.__morph_data.empty():
-                position = self.__ppoints.get()
-                morph = self.__morph_data.get()
-                pkey = position._get_hash()
-                dkey = morph._get_hash()
-                
-                if pkey in self.__cache_positions and dkey in self.__cache_morph_data:
-                    self.__hrirs_cache.put(self.__cache_positions[pkey])
-                    self.__rirs_cache.put(self.__cache_morph_data[dkey])
-                    
-                elif pkey in self.__cache_positions and dkey not in self.__cache_morph_data:
-                    self.__hrirs_cache.put(self.__cache_positions[pkey])
-                    rir = self.build_hybrid_space(direction=morph.direction, morph_curve=morph.morph_curve)
-                    self.__rirs_cache.put(rir)
-                
-                elif pkey not in self.__cache_positions and dkey in self.__cache_morph_data:
-                    hrirs = self.query_hrirs(spatial_position=position, n_neighs=self.__params.interpolation_neighs)
-                    hrir = self.build_distance_based_hrir(hrirs=hrirs, c=343.3)
-                    self.__hrirs_cache.put(hrir)
-                    self.__rirs_cache.put(self.__cache_morph_data[dkey])
-                
-                else:
-                    hrirs = self.query_hrirs(spatial_position=position, n_neighs=self.__params.interpolation_neighs)
-                    with ThreadPoolExecutor(max_workers=2) as calculator:
-                        hrir__distance_based = calculator.submit(self.build_distance_based_hrir, hrirs, 343.3)
-                        rir_calculated = calculator.submit(self.build_hybrid_space, morph.direction, morph.morph_curve)
-                        hrir = hrir__distance_based.result()
-                        rir = rir_calculated.result()
-                        
-                    self.__hrirs_cache.put(hrir)
-                    self.__rirs_cache.put(rir)
-            else: 
-                continue
             
-            time.sleep(0.01)
+            condition = not self.__ppoints.empty()
+            if self.rir_builder is not None:
+                condition = not self.__ppoints.empty() and not self.__morph_data.empty()
+            
+            position = None
+            match self.rir_builder:
+                case None:
+                    if condition:
+                        position = self.__ppoints.get()
+                        pkey = position._get_hash()
+                        
+                        check_hrir = self.__cache_positions.get(pkey)
+                        
+                        hrir = None
+                        if check_hrir:
+                            hrir = check_hrir
+                            rir = self.build_hybrid_space(direction=morph.direction, morph_curve=morph.morph_curve)
+                        
+                        else:
+                            hrirs = self.query_hrirs(spatial_position=position, n_neighs=self.__params.interpolation_neighs)
+                            hrir = self.build_distance_based_hrir(hrirs=hrirs, c=343.3)
+                        
+                        self.__hrirs_cache.put(hrir)
+                        
+                case _:
+                    if condition:
+                        position = self.__ppoints.get()
+                        morph = self.__morph_data.get()
+                        pkey = position._get_hash()
+                        mkey = morph._get_hash()
+                        
+                        check_hrir, check_rir = self.__cache_positions.get(pkey), self.__cache_morph_data.get(mkey) 
+                        
+                        hrir, rir = None, None
+                        if check_hrir and check_rir:
+                            hrir = check_hrir
+                            rir = check_rir
+                            
+                        elif check_hrir:
+                            hrir = check_hrir
+                            rir = self.build_hybrid_space(direction=morph.direction, morph_curve=morph.morph_curve)
+                        
+                        elif check_rir:
+                            hrirs = self.query_hrirs(spatial_position=position, n_neighs=self.__params.interpolation_neighs)
+                            hrir = self.build_distance_based_hrir(hrirs=hrirs, c=343.3)
+                            rir = check_rir
+                        
+                        else:
+                            hrirs = self.query_hrirs(spatial_position=position, n_neighs=self.__params.interpolation_neighs)
+                            
+                            with ThreadPoolExecutor(max_workers=2) as calculator:
+                                hrir__distance_based = calculator.submit(self.build_distance_based_hrir, hrirs, 343.3)
+                                rir_calculated = calculator.submit(self.build_hybrid_space, morph.direction, morph.morph_curve)
+                                hrir = hrir__distance_based.result()
+                                rir = rir_calculated.result()
+                        
+                        self.__hrirs_cache.put(hrir)
+                        self.__rirs_cache.put(rir)
+                        
+            time.sleep(1 / self.__params.fs)
     
     def start_space_data_process(self) -> None:
         """
@@ -221,11 +262,27 @@ class Hybrizone():
             kernels or None
         """
         
-        if self.__hrirs_cache.empty() or self.__rirs_cache.empty():
-            return None
-        k = HybriKernels(rir=self.__rirs_cache.get(), hrir=self.__hrirs_cache.get())
-        if not isinstance(k, HybriKernels):
-            return None
+        match self.rir_builder:
+            case None:
+                if self.__hrirs_cache.empty():
+                    return None
+                
+                hrir = self.__hrirs_cache.get()
+                k = HybriKernels(rir=None, hrir=hrir)
+                if not isinstance(k, HybriKernels):
+                    return None
+                return k
+            case _:
+                if self.__hrirs_cache.empty() or self.__rirs_cache.empty():
+                    return None
+                
+                hrir = self.__hrirs_cache.get()
+                rir = self.__rirs_cache.get()
+                k = HybriKernels(rir=rir, hrir=hrir)
+                if not isinstance(k, HybriKernels):
+                    return None
+                return k
+    
         return k
     
     # --- START HRIR SECTION ---
