@@ -1,15 +1,34 @@
+import scipy.signal
+import scipy.special
 import hrir_builder as hrb
 from hrir_builder import CoordMode, PolarPoint, AirData, BuildMode, AngleMode, HInfo, InterpolationDomain
 from rir_builder import CurveMode, MorpData
 import rir_builder as rib
 from common_modules import np, NDArray
 import scipy
-from threading import Thread, Event, Lock
+from threading import Thread, Event
 from concurrent.futures import ThreadPoolExecutor
-
-
 from queue import Queue
 import time
+
+class SmoothedConvolution():
+    
+    @staticmethod
+    def apply_intermediate(x: NDArray[np.float32], prev_kernel: NDArray[np.float32], curr_kernel: NDArray[np.float32], transition_length: int) -> NDArray[np.float32]:
+        ksize = max(prev_kernel.size, curr_kernel.size)
+        smoothed = np.zeros(x.size + ksize - 1, dtype=np.float32)
+        prev_kernel = np.pad(prev_kernel, (0, ksize - prev_kernel.size), mode="constant")
+        kernel_padded = np.pad(curr_kernel, (0, ksize - curr_kernel.size), mode="constant")
+        
+        transition_length = min(transition_length, smoothed.size)
+        for i in range(transition_length):
+            alpha = float(i / (transition_length - 1))
+            crossed = (1 - alpha) * prev_kernel + alpha * kernel_padded
+            smoothed[i:i + ksize] += x[i] * crossed
+        if transition_length < x.size:
+            rest_part = scipy.signal.fftconvolve(x[transition_length:], kernel_padded, mode="full")
+            smoothed[transition_length:transition_length + rest_part.size] += rest_part
+        return smoothed
 
 class HybriParams():
     def __init__(self, hrir_database: str, rir_database: str|None, coord_mode: CoordMode, interp_domain: InterpolationDomain, build_mode: BuildMode, chunk_size: int = 1024, interpolation_neighs: int = 3, sample_rate: float = 44100):
@@ -49,10 +68,19 @@ class RTOverlapSaveBufferConvolution():
     def __init__(self, chunk: int):
         self.buffer = np.empty(0, dtype=np.float32)
         self.chunk = chunk
+        self.pkernel = None
+        self.transition_size = int(self.chunk / 2 ** 4)
     
     def process(self, x: NDArray[np.float32], kernel: NDArray[np.float32]) -> NDArray[np.float32]:
-        convolution = scipy.signal.fftconvolve(x, kernel, mode="full")
-        max_lenght = min(self.buffer.size, convolution.size - 1)
+        
+        if self.pkernel is None:
+            convolution = scipy.signal.fftconvolve(x, kernel, mode="full")
+        else:
+            convolution = SmoothedConvolution.apply_intermediate(x=x, prev_kernel=self.pkernel, curr_kernel=kernel, transition_length=self.transition_size)
+                
+        self.pkernel = kernel
+        
+        max_lenght = min(self.buffer.size, convolution.size)
         convolution[:max_lenght] += self.buffer[:max_lenght]
         convolved = convolution[:self.chunk]
         self.buffer = convolution[self.chunk:]
@@ -62,7 +90,7 @@ class HybriKernels():
     def __init__(self, rir: NDArray[np.float32] | None, hrir: NDArray[np.float32]):
         self.rir = rir
         self.hrir = hrir
-
+    
 class Hybrizone():
     
     SOFT_CLIP_SCALE = 1 / 0.707
@@ -81,7 +109,7 @@ class Hybrizone():
         self.__hrir_right_buffer = RTOverlapSaveBufferConvolution(chunk=self.__params.chunk_size)
         
         self.__cache_positions = {}
-        self.__ppoints = Queue()
+        self.__ppoints = Queue() 
         self.__hrirs_cache = Queue()
         
         self.__cache_morph_data = {}
@@ -125,11 +153,11 @@ class Hybrizone():
         NDArray[np.float32]
             frame processed
         """
-        
+            
         mono = frame
         if kernels.rir is not None:
             mono = self.__rir_buffer.process(x=frame, kernel=kernels.rir)
-            
+        
         with ThreadPoolExecutor(max_workers=2) as convolver:
             lc = convolver.submit(self.__hrir_left_buffer.process, mono, kernels.hrir[:, 0])
             lr = convolver.submit(self.__hrir_right_buffer.process, mono, kernels.hrir[:, 1])
@@ -137,8 +165,7 @@ class Hybrizone():
             right_hrir = lr.result()
 
         convolved = np.column_stack((left_hrir, right_hrir)).astype(np.float32)
-        
-        return np.tanh(convolved * self.SOFT_CLIP_SCALE) / self.SOFT_CLIP_SCALE
+        return np.tanh(convolved * self.SOFT_CLIP_SCALE)
             
     def __start_space_data_process(self) -> None:
         while not self.__space_process_is_alive.is_set():
