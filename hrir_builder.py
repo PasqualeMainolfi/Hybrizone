@@ -1,291 +1,141 @@
-from common_modules import np, h5py, NDArray, Enum, plt, gridspec
+import numpy as np
+from numpy.typing import NDArray
+import h5py
+import matplotlib.pyplot as plt
+from matplotlib import gridspec
 import scipy as sp
-import hashlib
+from concurrent.futures import ThreadPoolExecutor
+from hybri_tools import AirData, ISO9613Filter, GeometricAttenuation, GAMMA, ETA, CoordMode, PolarPoint, InterpolationDomain, BuildMode
 
-class CoordMode(Enum):
-    INTERAURAL = 0
-    REGULAR = 1
-
-class AngleMode(Enum):
-    RADIANS = 0
-    DEGREE = 1
-
-class BuildMode(Enum):
-    BILINEAR = 0
-    INVERSE_DISTANCE = 1
-    LINEAR_INVERSE_DISTANCE = 2
-    LINEAR = 3
-    HERMITE = 4
+class HrirHDFData():
+    def __init__(self, dataset_path: str, coord_mode: CoordMode):
+        self.data = h5py.File(dataset_path, "r")
+        self.coord_mode = coord_mode
+        self.neighs_finder = self.__load_ktree(mode=self.coord_mode)
     
-class InterpolationDomain(Enum):
-    TIME = 0
-    FREQUENCY = 1
-
-class CartesianPoint():
-    def __init__(self, x: float, y: float, z: float):
-        self.x = x
-        self.z = z
-        self.y = y
-
-class AirData():
-    def __init__(self, temperature: float, humidity: float, pressure: float = 101325):
-        """
-        AirData for ISO 9613-1
-
-        Parameters
-        ----------
-        temperature : float
-            tempertature in celsius
-        humidity : float
-            humidity in percent from 0 to 1 where 1 = 100%
-        pressure : float
-            atmospheric pressure in Pa, default = 101325
-        """
-        
-        self.kelvin = temperature + 273.15
-        self.humidity = humidity
-        self.pressure = pressure / 101325.0
-
-class PolarPoint():
-    def __init__(self, rho: float, phi: float, theta: float, opt: AngleMode):
-        
-        """
-        Polar Point
-
-        Parameters
-        ----------
-        rho : float
-            radius in meters (0, ...)
-        phi : float
-            elevation (-90 <= phi <= 90) in degree
-        theta : float
-            azimuth (0 <= theta <= 360) in degree
-        """
-
-        self.opt = opt
-        self.rho = rho
-        
-        if opt == AngleMode.DEGREE:
-            phi = np.deg2rad(phi)
-            theta = np.deg2rad(theta)
-        
-        self.phi = phi
-        self.theta = theta
-        
+    def get_hrir(self, key: str) -> NDArray[np.float64]:
+        return self.data["hrir"][key]
     
-    def get_cartesian(self, mode: CoordMode) -> CartesianPoint:
-        x = 0.0
-        y = 0.0
-        z = 0.0
-        
-        match mode:
+    def get_hrtf(self, key: str) -> NDArray[np.float64]:
+        return self.data["hrir_fft"][key]
+    
+    def get_polar_reference(self, index: int) -> NDArray[np.int16]:
+        return self.data["polar_index"][index]
+    
+    def get_itd(self, key: str) -> np.float64:
+        return self.data["hrir_itd"][key][()]
+    
+    def get_sample_rate(self) -> np.float64:
+        return self.data.attrs["fs"]
+    
+    def get_source_distance(self) -> np.float64:
+        return self.data.attrs["source_distance"]
+    
+    def get_cartesian_reference(self, index: int) -> NDArray[np.float64]:
+        match self.coord_mode:
             case CoordMode.REGULAR:
-                x = np.sin(self.theta) * np.cos(self.phi)
-                y = np.cos(self.theta) * np.cos(self.phi)
-                z = np.sin(self.phi)
+                return self.data["regular_coords"][index]
             case CoordMode.INTERAURAL:
-                x = np.sin(self.theta)
-                y = np.cos(self.theta) * np.cos(self.phi)
-                z = np.cos(self.theta) * np.sin(self.phi)
-            case _:
-                print("[ERROR] Mode not allowed!")
-                exit(1)
-        
-        x = x * 0.99
-        y = y * 0.99 + 0.01
-        z = z * 0.99
-        
-        return CartesianPoint(x=x, y=y, z=z)
+                return self.data["interaural_coords"][index]    
     
-    def _get_hash(self):
-        return hashlib.md5(f"{self.rho}_{self.phi}_{self.theta}".encode()).hexdigest()
+    def get_shape(self) -> NDArray[np.int16]:
+        return self.data.attrs["hrir_shape"]
+    
+    def close_data(self) -> None:
+        self.data.close()
+
+    def __load_ktree(self, mode: CoordMode) -> sp.spatial.cKDTree:
+        coords = self.data["regular_coords"][:] if mode == CoordMode.REGULAR else self.data["interaural_coords"][:]
+        return sp.spatial.cKDTree(data=coords)
+
 
 class HInfo():
     def __init__(
-        self, hrirs: NDArray[np.float32], 
-        hffts: NDArray[np.complex64], 
+        self, 
+        hrirs: NDArray[np.float32], 
+        hrtfs: NDArray[np.complex64], 
         itds: NDArray[np.float32], 
-        coords: NDArray[np.int16], 
+        coords: NDArray[np.int16],
+        distances: NDArray[np.float64], 
         target: PolarPoint, 
         shape: NDArray[np.float32], 
         n_neighs: int
     ) -> None:
         
         self.hrirs = hrirs
-        self.hffts = hffts
+        self.hrtfs = hrtfs
         self.itds = itds
         self.coords = coords
+        self.distances = distances
         self.target = target
         self.shape = shape
         self.n_neighs = n_neighs
 
 class HRIRBuilder():
     
-    # DYNAMIC DISTANCE FILTER 
-    NFREQS = 256
-    
-    # DISTANCE PERCPETION FACTORS
-    GAMMA = 0.36 # exponent in distance perception
-    ETA = 0.01 # minimum distance threshold
-    
     def __init__(self, hrir_database: str, mode: CoordMode, interp_domain: InterpolationDomain):
-        self.h = h5py.File(hrir_database, "r")
+        self.dataset = HrirHDFData(dataset_path=hrir_database, coord_mode=mode)
         self.mode = mode
-        self.coordinates = self.h["regular_coords"][:] if self.mode == CoordMode.REGULAR else self.h["interaural_coords"][:]
-        self.polar_reference = self.h["polar_index"][:]
-        self.hrirs = self.h["hrir"]
-        self.hffts = self.h["hrir_fft"]
-        self.itds = self.h["hrir_itd"]
-        self.hrir_shape = self.h.attrs["hrir_shape"]
-        self.fs = self.h.attrs["fs"]
-        self.source_distance = self.h.attrs["source_distance"]
+        self.hrir_shape = self.dataset.get_shape()
+        self.fs = self.dataset.get_sample_rate()
+        self.source_distance = self.dataset.get_source_distance()
+        self.geometric_attenuation = GeometricAttenuation(fs=self.fs, channels=2)
         self.interp_domain = interp_domain
-        self.tree = self.__load_tree()
-        self.__frequencies = np.linspace(0, self.fs / 2, self.NFREQS)
+        self.iso9613 = None
         self.db_attenuation = None
+        
         self.__att_factor = None
         self.__p = None
         self.__air_conditions = None
     
     def close(self) -> None:
-        self.h.close()
+        self.dataset.close_data()
     
     def set_air_conditions(self, air_data: AirData) -> None:
         self.__air_conditions = air_data
-        self.db_attenuation = self.__air_absorption(kelvin=air_data.kelvin, humidity=air_data.humidity, p_atm=air_data.pressure)
+        self.iso9613 = ISO9613Filter(air_data=air_data, fs=self.fs)
+        self.db_attenuation = self.iso9613.get_attenuation_air_absorption()
     
-    def __load_tree(self) -> sp.spatial.cKDTree:
-        return sp.spatial.cKDTree(data=self.coordinates)
-    
-    def __calculate_distance(self, hrirs, coords, target_ele, target_azi) -> tuple[NDArray[np.float32] | None, NDArray[np.float32] | None]:
-        c = np.column_stack([coords[:, 0], coords[:, 1]])
-        t = np.array([target_ele, target_azi]).reshape(1, -1)
-        distance = sp.spatial.distance_matrix(c, t).flatten()
-        if np.min(distance) < 1e-6:
-            closest = np.argmin(distance)
-            return None, hrirs.hrirs[closest]
-        return distance, None
-    
-    def __interpolated_hrir(self, hrirs: HInfo, method: BuildMode, mode: InterpolationDomain) -> NDArray[np.float32]:
-        coords = hrirs.coords
-        min_azi, max_azi = np.min(coords[:, 1]), np.max(coords[:, 1])
-        min_ele, max_ele = np.min(coords[:, 0]), np.max(coords[:, 0])
-        
-        if method in [BuildMode.BILINEAR, BuildMode.HERMITE] and hrirs.n_neighs != 4:
-            print("[ERROR] Methods BILINEAR and HERMITE requires 4 neighs!")
-            exit(1)
-            
-        target_azi = hrirs.target.theta
-        target_ele = hrirs.target.phi
-        
-        h = None
-        
-        match mode:
-            case InterpolationDomain.TIME:
-                h = hrirs.hrirs
-            case InterpolationDomain.FREQUENCY:
-                h = hrirs.hffts
+    def __interpolated_hrir(self, hrirs_info: HInfo, method: BuildMode, mode: InterpolationDomain) -> NDArray[np.float32]:
+        h = hrirs_info.hrirs if mode == InterpolationDomain.TIME else hrirs_info.hrtfs
         
         interpolated_freq = None
         interpolated_time = None
         interpolated_itd = None
 
+        min_arg = np.argmin(hrirs_info.distances)
+        if hrirs_info.distances[min_arg] < 1e-6:
+            return hrirs_info.hrirs[min_arg]
+        
         match method:
-            case BuildMode.BILINEAR:
-                den = (max_azi - min_azi) * (max_ele - min_ele)
-                w1 = ((max_azi - target_azi) * (max_ele - target_ele)) / den
-                w2 = ((target_azi - min_azi) * (max_ele - target_ele)) / den
-                w3 = ((max_azi - target_azi) * (target_ele - min_ele)) / den
-                w4 = ((target_azi - min_azi) * (target_ele - min_ele)) / den
+                        
+            case BuildMode.INVERSE_DISTANCE | BuildMode.LINEAR_INVERSE_DISTANCE:
+                w = 1 / hrirs_info.distance ** 2 if method == BuildMode.INVERSE_DISTANCE else 1 / hrirs_info.distance
+                w /= np.sum(w)
                 
-                interpolated_itd = w1 * hrirs.itds[0] + w2 * hrirs.itds[1] + w3 * hrirs.itds[2] + w4 * hrirs.itds[3]
+                interpolated_itd = np.sum([w[i] * hrirs_info.itds[i] for i in range(hrirs_info.n_neighs)])
                 
                 match mode:
                     case InterpolationDomain.TIME:
-                        interpolated_time = w1 * h[0] + w2 * h[1] + w3 * h[2] + w4 * h[3]
+                        interpolated_time = np.sum([w[i] * h[i] for i in range(hrirs_info.n_neighs)], axis=0)
                     case InterpolationDomain.FREQUENCY:
-                        m1, m2, m3, m4 = h[0]["mag"], h[1]["mag"], h[2]["mag"], h[3]["mag"]
-                        p1, p2, p3, p4 = np.unwrap(h[0]["angle"], axis=0), np.unwrap(h[1]["angle"], axis=0), np.unwrap(h[2]["angle"], axis=0), np.unwrap(h[3]["angle"], axis=0)
-                        interpolated_freq = (w1 * (m1 * np.exp(1j * p1)) + w2 * (m2 * np.exp(1j * p2)) + w3 * (m3 * np.exp(1j * p3)) + w4 * (m4 * np.exp(1j * p4)))
-                        
-            case BuildMode.INVERSE_DISTANCE | BuildMode.LINEAR_INVERSE_DISTANCE | BuildMode.LINEAR:
-                distance, hsingular = self.__calculate_distance(hrirs=hrirs, coords=coords, target_ele=target_ele, target_azi=target_azi)
-                if distance is None:
-                    return hsingular
-                
-                match method:
-                    case BuildMode.INVERSE_DISTANCE | BuildMode.LINEAR_INVERSE_DISTANCE:
-                        w = 1 / distance ** 2 if method == BuildMode.INVERSE_DISTANCE else 1 / distance
-                        w /= np.sum(w)
-                        
-                        interpolated_itd = np.sum([w[i] * hrirs.itds[i] for i in range(hrirs.n_neighs)])
-                        
-                        match mode:
-                            case InterpolationDomain.TIME:
-                                interpolated_time = np.sum([w[i] * h[i] for i in range(hrirs.n_neighs)], axis=0)
-                            case InterpolationDomain.FREQUENCY:
-                                interpolated_freq = np.sum([w[i] * (h[i]["mag"] * np.exp(1j * np.unwrap(h[i]["angle"], axis=0))) for i in range(hrirs.n_neighs)], axis=0)
-                    
-                    case BuildMode.LINEAR:
-                            indexes = np.argsort(distance)
-                            # print(indexes)
-                            i, j = indexes[:2]
-                            d1, d2 = distance[i], distance[j]
-                            alpha = d1 / (d1 + d2)
-                            # print(alpha)
-                            
-                            interpolated_itd = (1 - alpha) * hrirs.itds[i] + alpha * hrirs.itds[j]
-                            
-                            match mode:
-                                case InterpolationDomain.TIME:
-                                    interpolated_time = (1 - alpha) * h[i] + alpha * h[j]
-                                case InterpolationDomain.FREQUENCY:
-                                    hi = h[i]["mag"] * np.exp(1j * np.unwrap(h[i]["angle"], axis=0))
-                                    hj = h[j]["mag"] * np.exp(1j * np.unwrap(h[j]["angle"], axis=0))
-                                    interpolated_freq = (1 - alpha) * hi + alpha * hj
+                        interpolated_freq = np.sum([w[i] * (h[i]["mag"] * np.exp(1j * np.unwrap(h[i]["angle"], axis=0))) for i in range(hrirs_info.n_neighs)], axis=0)
             
-            case BuildMode.HERMITE:
-                distance, hsingular = self.__calculate_distance(hrirs=hrirs, coords=coords, target_ele=target_ele, target_azi=target_azi)
-                if distance is None:
-                    return hsingular
-                
-                indexes = np.argsort(distance)
-                i0, i1, i2, i3 = indexes
-                d1, d2 = distance[i1], distance[i2]
-                mu = d1 + d2 / np.sum(distance)
-                
-                itd0 = -0.5 * hrirs.itds[i0] + 1.5 * hrirs.itds[i1] - 1.5 * hrirs.itds[i2] + 0.5 * hrirs.itds[i3]
-                itd1 = hrirs.itds[i0] - 2.5 * hrirs.itds[i1] + 2.0 * hrirs.itds[i2] - 0.5 * hrirs.itds[i3]
-                itd2 = -0.5 * hrirs.itds[i0] + 0.5 * hrirs.itds[i2]
-                itd3 = hrirs.itds[i1]
-
-                mu_itd = hrirs.itds[i1] + hrirs.itds[i2] / np.sum(hrirs.itds) 
-                interpolated_itd = itd0 * pow(mu_itd, 3) + itd1 * pow(mu_itd, 2) + itd2 + itd3
-                
-                match mode:
-                    case InterpolationDomain.TIME:
-                        a0 = -0.5 * h[i0] + 1.5 * h[i1] - 1.5 * h[i2] + 0.5 * h[i3]
-                        a1 = h[i0] - 2.5 * h[i1] + 2.0 * h[i2] - 0.5 * h[i3]
-                        a2 = -0.5 * h[i0] + 0.5 * h[i2]
-                        a3 = h[i1]
-                        
-                        interpolated_time = a0 * pow(mu, 3) + a1 * pow(mu, 2) + a2 + a3
-                        
-                    case InterpolationDomain.FREQUENCY:
-
-                        m1, m2, m3, m4 = h[i0]["mag"], h[i1]["mag"], h[i2]["mag"], h[i3]["mag"]
-                        p1, p2, p3, p4 = np.unwrap(h[i0]["angle"], axis=0), np.unwrap(h[i1]["angle"], axis=0), np.unwrap(h[i2]["angle"], axis=0), np.unwrap(h[i3]["angle"], axis=0)
-
-                        a0 = -0.5 * (m1 * np.exp(1j * p1)) + 1.5 * (m2 * np.exp(1j * p2)) - 1.5 * (m3 * np.exp(1j * p3)) + 0.5 * (m4 * np.exp(1j * p4))
-                        a1 = (m1 * np.exp(1j * p1)) - 2.5 * (m2 * np.exp(1j * p2)) + 2.0 * (m3 * np.exp(1j * p3)) - 0.5 * (m4 * np.exp(1j * p4))
-                        a2 = -0.5 * (m1 * np.exp(1j * p1)) + 0.5 * (m3 * np.exp(1j * p3))
-                        a3 = m2 * np.exp(1j * p2)
-
-                        interpolated_freq = a0 * pow(mu, 3) + a1 * pow(mu, 2) + a2 + a3
-
-            case _:
-                print("[ERROR] Method not allowed!")
-                exit(1)
+            case BuildMode.LINEAR:
+                    i, j = 0, 1
+                    d1, d2 = hrirs_info.distances[i], hrirs_info.distances[j]
+                    alpha = d1 / (d1 + d2)
+                    # print(alpha)
+                    
+                    interpolated_itd = (1 - alpha) * hrirs_info.itds[i] + alpha * hrirs_info.itds[j]
+                    
+                    match mode:
+                        case InterpolationDomain.TIME:
+                            interpolated_time = (1 - alpha) * h[i] + alpha * h[j]
+                        case InterpolationDomain.FREQUENCY:
+                            hi = h[i]["mag"] * np.exp(1j * np.unwrap(h[i]["angle"], axis=0))
+                            hj = h[j]["mag"] * np.exp(1j * np.unwrap(h[j]["angle"], axis=0))
+                            interpolated_freq = (1 - alpha) * hi + alpha * hj
         
         freqs = np.fft.rfftfreq(self.hrir_shape[0], d=1 / self.fs)
         
@@ -316,73 +166,21 @@ class HRIRBuilder():
         
         return result
     
-    def __air_absorption(self, kelvin: float, humidity: float, p_atm: float) -> NDArray[np.float32]:
-        h = humidity * 10 ** ((-6.8346 * (273.16 / kelvin) ** 1.261) + 4.6151)
         
-        # Frequenze di rilassamento per ossigeno e azoto (Hz)
-        f_rO = p_atm * (24.0 + 4.04e4 * h * (0.02 + h) / (0.391 + h))
-        f_rN = p_atm * (9.0 + 280.0 * h * np.exp(-4.17 * ((kelvin / 293.0) - 1)))
-        
-        # Calcolo del coefficiente di assorbimento in dB/m
-        freq_kHz = self.__frequencies / 1000.0  # conversione in kHz
-        
-        # Termine per l'assorbimento classico (viscosità e conduzione termica)
-        alpha_classical = 1.84e-11 * (p_atm) ** (-1) * np.sqrt(kelvin / 293.15) * freq_kHz ** 2
-        
-        # Termine per il rilassamento dell'ossigeno
-        alpha_oxygen = 0.01275 * np.exp(-2239.1 / kelvin) * freq_kHz ** 2 / (f_rO / 1000.0 + (freq_kHz ** 2 / f_rO / 1000.0))
-        
-        # Termine per il rilassamento dell'azoto
-        alpha_nitrogen = 0.1068 * np.exp(-3352.0 / kelvin) * freq_kHz ** 2 / (f_rN / 1000.0 + (freq_kHz ** 2 / f_rN / 1000.0))
-        
-        # Coefficiente di assorbimento totale (in dB/m)
-        alpha = alpha_classical + alpha_oxygen + alpha_nitrogen
-        
-        return alpha.astype(np.float32)
-    
-    def __multiband_fft_filter(self, frame: NDArray[np.float32], attenuation: NDArray[np.float32], fs: float):
-        n = len(frame)
-        fpoints = self.__frequencies / (fs / 2) # normalized
-        gain_interpolator = sp.interpolate.interp1d(fpoints, attenuation, bounds_error=False, fill_value=(attenuation[0], attenuation[-1]))
-        fft_freqs = np.linspace(0, 1, n // 2 + 1)
-        fresp = gain_interpolator(fft_freqs)
-        fresp = fresp[:, None].astype(np.complex64)
-        fft = np.fft.rfft(frame, axis=0)
-        filtered_fft = fft * fresp
-        filtered = np.fft.irfft(filtered_fft, n=n, axis=0)
-        return filtered
-    
-    def __air_absorption_filter(self, frame: NDArray[np.float64], distance: float) -> NDArray[np.float64]:
-        # Filtro basato su ISO 9613-1 (see __air_absorption)
-        if self.db_attenuation is None:
-            print("[ERROR] Air Conditions must be defined (use .set_air_conditions() method first)!")
-        relative_distance = distance if distance > 0 else 0
-        db_attenuation = self.db_attenuation * relative_distance
-        gain = 10 ** (-db_attenuation / 20.0)
-        gain[-1] = 0.0
-        filtered = self.__multiband_fft_filter(frame=frame, attenuation=gain, fs=self.fs)
-        return filtered
-        
-    def __distance_based_hrir(self, hrir: NDArray[np.float64], rho: float, c: float) -> NDArray[np.float64]:
-        original_distance = max(self.source_distance, 1e-6)
-        fs = self.fs
-        factor = (original_distance / rho) ** self.GAMMA # il fattore di attenuazione è in rapporto con la distanza originale in modo tale da lasciare invariata l'ampiezza alla distanza originale
+    def __distance_based_hrir(self, hrir: NDArray[np.float64], rho: float) -> NDArray[np.float64]:
+        factor = self.geometric_attenuation.calculate_geometric_attenuation(source_distance=self.source_distance, distance=rho)
         self.__att_factor = factor
         
-        delayed_samples = rho * fs / c
-        int_delay = int(np.floor(delayed_samples))
-        frac_delay = delayed_samples - int_delay
+        if factor < 1.0:
+            with ThreadPoolExecutor(max_workers=2) as delayer:
+                lc = delayer.submit(self.geometric_attenuation.apply_fractional_delay, signal=hrir[:, 0], distance=rho, channel=0)
+                rc = delayer.submit(self.geometric_attenuation.apply_fractional_delay, signal=hrir[:, 1], distance=rho, channel=1)
+                hrir[:, 0] = lc.result()
+                hrir[:, 1] = rc.result()
+                
+        filtered = self.iso9613.air_absorption_filter(frame=hrir, alpha_absortion=self.db_attenuation, distance=rho - max(self.source_distance, ETA)) * factor
         
-        h = np.pad(hrir, ((int_delay, 0), (0, 0)), mode="constant")
-        
-        if frac_delay != 0:
-            x = np.arange(h.shape[0])
-            interpolator = sp.interpolate.interp1d(x, h, axis=0, kind='linear', fill_value="extrapolate")
-            h = interpolator(x + frac_delay)
-        
-        filtered = self.__air_absorption_filter(frame=h, distance=rho - original_distance) * factor
-        # print(factor)
-        return filtered * factor
+        return filtered
     
     def prepare_hrirs(self, point: PolarPoint, neighs: int) -> HInfo:
         """
@@ -401,45 +199,30 @@ class HRIRBuilder():
         
         """
         
-        point.rho = max(point.rho, self.ETA)
+        point.rho = max(point.rho, ETA)
         self.__p = point
         
-        # if target exists in polar references
-        check = np.rad2deg(np.array([point.theta, point.phi]))
-        check = np.ceil(check).astype(np.int16)
-        # print(self.polar_reference, np.ceil(check).astype(np.int16))
-        if np.any(np.all(self.polar_reference == check, axis=1)):
-            phi = check[1]
-            theta = check[0]
-            key = f"{phi}:{theta}"
-            return HInfo(
-                hrirs=self.hrirs[key][:],
-                hffts=self.hffts[key],
-                itds=self.itds[key], 
-                coords=check[::-1],
-                target=point,
-                shape=self.hrir_shape,
-                n_neighs=1
-            )
-        
         cart = point.get_cartesian(mode=self.mode)
-        _, indices = self.tree.query([cart.x, cart.y, cart.z], k=neighs)
+        distances, indices = self.dataset.neighs_finder.query([cart.x, cart.y, cart.z], k=neighs)
         
         hinfo = HInfo(
             hrirs=np.empty((neighs, self.hrir_shape[0], self.hrir_shape[1])),
-            hffts=[],
+            hrtfs=[],
             itds=np.empty(neighs, dtype=np.float32),
             coords=np.zeros((neighs, 2)),
+            distances=np.zeros(neighs, dtype=np.float64),
             target=point,
             shape=self.hrir_shape,
             n_neighs=neighs
         )
         
         for i, min_index in enumerate(indices):
-            coord = self.polar_reference[min_index]
+            coord = self.dataset.get_polar_reference(index=min_index)
             elev, azim = None, None
+            
             if self.mode == CoordMode.INTERAURAL:
-                x, y, z = self.coordinates[min_index, 0], self.coordinates[min_index, 1], self.coordinates[min_index, 2]
+                c = self.dataset.get_cartesian_reference(index=min_index)
+                x, y, z = c[0], c[1], c[2]
                 elev_temp = np.arctan2(z, y)
                 azim_temp = np.arcsin(x)
 
@@ -447,21 +230,23 @@ class HRIRBuilder():
                 azim = np.rad2deg(azim_temp) if y >= 0.0 else np.rad2deg(azim_temp) + 180
             else:
                 azim, elev = coord
+                
             key = f"{int(elev)}:{int(azim)}"
-            hrir = self.hrirs[key][:]
-            hinfo.hrirs[i, :, :] = hrir
-            hinfo.hffts.append(self.hffts[key])
-            hinfo.itds[i] = self.itds[key][()]
+            hinfo.hrirs[i, :, :] = self.dataset.get_hrir(key=key)[:]
+            hinfo.hrtfs.append(self.dataset.get_hrtf(key=key))
+            hinfo.itds[i] = self.dataset.get_itd(key=key)
             hinfo.coords[i] = np.array([int(elev), int(azim)])
+            hinfo.distances = distances
+            
         return hinfo
     
-    def build_hrir(self, hrirs: HInfo, method: BuildMode, c: float = 343.3) -> NDArray[np.float64]:
+    def build_hrir(self, hrirs_info: HInfo, method: BuildMode) -> NDArray[np.float64]:
         """
         GENERATE INTERPOLATED DISTANCE-BASED HRIR
 
         Parameters
         ----------
-        hrirs : HInfo
+        hrirs_info : HInfo
             generated HRIRs info from self.prepare_hrirs method
         method : BuildMode
             interpolation mode (see BuildMode)
@@ -476,11 +261,11 @@ class HRIRBuilder():
             interpolated distance based hrir left and right channel
         """
         
-        if hrirs.n_neighs == 1: 
-            return self.__distance_based_hrir(hrir=hrirs.hrirs, rho=hrirs.target.rho, c=c)
+        if hrirs_info.n_neighs == 1: 
+            return self.__distance_based_hrir(hrir=hrirs_info.hrirs, rho=hrirs_info.target.rho)
         
-        interpolated = self.__interpolated_hrir(hrirs=hrirs, method=method, mode=self.interp_domain)
-        return self.__distance_based_hrir(hrir=interpolated, rho=hrirs.target.rho, c=c)
+        interpolated = self.__interpolated_hrir(hrirs_info=hrirs_info, method=method, mode=self.interp_domain)
+        return self.__distance_based_hrir(hrir=interpolated, rho=hrirs_info.target.rho)
     
     def plot_hrir(self, data: NDArray[np.float64], title: str) -> None:
         sr = self.fs
@@ -508,8 +293,11 @@ class HRIRBuilder():
         temp = self.__air_conditions.kelvin - 273.15
         hum = self.__air_conditions.humidity * 100
         pres = self.__air_conditions.pressure * 101325.0
+        phi = ((np.rad2deg(phi) + 90) % 180) - 90
+        phi = np.round(phi, decimals=3)
+        theta = np.round(np.rad2deg(theta) % 360, decimals=3)
         
-        plt.suptitle(f'{title}' "\n" rf'$T = {temp} \degree C$, $RH = {hum} \%$, $P = {pres} Pa$' "\n" rf'$(\rho, \phi, \theta) = {rho, phi, theta}$, $d_0 = {self.source_distance}m$, $d = {rho}m$, $\alpha = {np.round(self.__att_factor, decimals=3)}$, $\gamma = {self.GAMMA}$, $\eta = {self.ETA}$')
+        plt.suptitle(f'{title}' "\n" rf'$T = {temp} \degree C$, $RH = {hum} \%$, $P = {pres} Pa$' "\n" rf'$(\rho, \phi, \theta) = {rho, phi, theta}$, $\varrho_0 = {self.source_distance}$, $\varrho = {rho}$, $\gamma(\varrho) = {np.round(self.__att_factor, decimals=3)}$, $y = {GAMMA}$, ' r'$\varrho_{min} = $' rf'${ETA}$')
         
         ax0.plot(f, ps[:, 0], c="k", lw=0.5)
         ax0.set_title("LEFT CH. POWER SPECTRUM")
@@ -520,8 +308,8 @@ class HRIRBuilder():
         ax1.set_xlabel("Freq.")
         ax1.set_ylabel("Mag.")
        
-        ax2.plot(self.__frequencies, db_attenuation, c="k", lw=0.5)
-        ax2.set_title(f"IMPOSED ISO 9613-1")
+        ax2.plot(self.iso9613._frequencies, db_attenuation, c="k", lw=0.5)
+        ax2.set_title("IMPOSED ISO 9613-1")
         ax2.set_xlabel("Freq.")
         ax2.set_ylabel("dB")
         

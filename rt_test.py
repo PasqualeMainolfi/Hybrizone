@@ -6,6 +6,9 @@ import pyaudio as pa
 import time
 import soundfile as sf
 
+
+# TODO: BISOGNA RISOLVERE IL PROBLEMA DELLA SINCRONIZZAZIONE PER LA RICERCA DELLA POSIZIONE IMMESSA __start_space_data_process METHOD IN get_rir_and_hrir METHOD
+
 # main scripts
 HRIR_PATH = "/Users/pm/AcaHub/Coding/BinauralSpatial/data/HRIR-KEMAR_DATASET.h5"
 RIR_PATH = "/Users/pm/AcaHub/Coding/BinauralSpatial/data/RIR-MIT_SURVEY.h5"
@@ -16,8 +19,8 @@ SR = 44100
 CHANNELS = 2
 
 PARAMS = HybriParams(
-        hrir_database=HRIR_PATH, 
-        rir_database=RIR_PATH, 
+        hrir_database_path=HRIR_PATH, 
+        rir_database_path=RIR_PATH, 
         coord_mode=CoordMode.REGULAR, 
         interp_domain=InterpolationDomain.FREQUENCY,
         build_mode=BuildMode.LINEAR,
@@ -57,6 +60,8 @@ def main() -> None:
     run = True
     mark = 0
     curr_time = 0
+    back = False
+    dstep = 10
     while True:
         
         try:
@@ -73,15 +78,25 @@ def main() -> None:
             # pass current position
             curr_ele = ((current_phi + 90) % 180)  - 90
             curr_azi = current_theta % 360
-            curr_rho = current_rho % 100
-            pos = PolarPoint(rho=current_rho, phi=curr_ele, theta=curr_azi, opt=AngleMode.DEGREE) # bisogna risolvere il problema dei click in transizioni di posizione
+            
+            if current_rho >= 100:
+                back = True
+            if current_rho <= dstep:
+                back = False
+            
+            if curr_time % 2 == 0:
+                if back:
+                    current_rho -= dstep
+                else:
+                    current_rho += dstep
+                    
+            pos = PolarPoint(rho=current_rho, phi=curr_ele, theta=curr_azi, opt=AngleMode.DEGREE) 
             AURALIZER.set_position(position=pos)
             
             if curr_time % 2 == 0:
-                current_theta += 50
-                current_phi += 50
-                current_rho += 0.1
-                # print(current_phi, current_theta)
+                current_theta += 45
+                current_phi += 45
+                # print(curr_ele, curr_azi, curr_rho)
             curr_time += 1
             
             # pass current hybrid space params

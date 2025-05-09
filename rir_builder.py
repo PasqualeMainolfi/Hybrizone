@@ -1,12 +1,11 @@
-from common_modules import np, h5py, NDArray, Enum, plt, gridspec
+import numpy as np
+from numpy.typing import NDArray
+import h5py
+import matplotlib.pyplot as plt
+from matplotlib import gridspec
 import hashlib
+from hybri_tools import ISO9613Filter, GeometricAttenuation, AirData, ETA, CurveMode
 
-class CurveMode(Enum):
-    LINEAR = 0
-    SIGMOID = 1
-    LOGARITHMIC = 2
-    EXPONENTIAL = 3
-    
 class PlotData():
     def __init__(self, t: NDArray[np.float32], f: NDArray[np.float32], mag: NDArray[np.float32], integr: NDArray[np.float32]):
         self.t = t
@@ -23,7 +22,7 @@ class MorpData():
         return hashlib.md5(f"{self.direction}-{self.morph_curve}".encode()).hexdigest()
 
 class RIRMorpha():
-    def __init__(self, rir_database: str):
+    def __init__(self, rir_database_path: str, source_distance: float):
         """
         Parameters
         ----------
@@ -31,16 +30,26 @@ class RIRMorpha():
             path to h5 database
         """
         
-        self.rirs = h5py.File(rir_database, "r")
+        self.rirs = h5py.File(rir_database_path, "r")
         self.fs = self.rirs.attrs["fs"]
         self.source1 = None
         self.source2 = None
         self.morphed = None
         self.length = None
         self.__cache = {"r1": None, "r2": None, "sf": None}
+        
+        self.iso9613 = None
+        self.db_attenuation = None
+        self.source_distance = source_distance
+        
+        self.geometric_attenuation = GeometricAttenuation(fs=self.fs, channels=1)
     
     def close(self) -> None:
         self.rirs.close()
+    
+    def set_air_conditions(self, air_data: AirData) -> None:
+        self.iso9613 = ISO9613Filter(air_data=air_data, fs=self.fs)
+        self.db_attenuation = self.iso9613.get_attenuation_air_absorption()
     
     def set_rirs(self, rir1: int, rir2: int, smooth_factor: float = 0.1) -> None:
         """
@@ -62,8 +71,10 @@ class RIRMorpha():
         source2 = self.rirs[k2][:]
         n1 = len(source1)
         n2 = len(source2)
-        if n1 < n2: source1 = np.pad(source1, (0, n2 - n1), constant_values=0.0, mode="constant")
-        elif n1 > n2: source2 = np.pad(source2, (0, n1 - n2), constant_values=0.0, mode="constant")
+        if n1 < n2: 
+            source1 = np.pad(source1, (0, n2 - n1), constant_values=0.0, mode="constant")
+        elif n1 > n2: 
+            source2 = np.pad(source2, (0, n1 - n2), constant_values=0.0, mode="constant")
         self.length = max(n1, n2)
         
         scep = self.__get_spectral_envelope(source=source1, smooth_factor=smooth_factor)
@@ -103,15 +114,24 @@ class RIRMorpha():
     
     def __nonlinear_morphing_curve(self, direction: float, curve_type: CurveMode) -> float:
         match curve_type:
-            case CurveMode.LINEAR: return direction
-            case CurveMode.SIGMOID: return 1 / (1 + np.exp(-10 * (direction - 0.5)))
-            case CurveMode.EXPONENTIAL: return direction**2
-            case CurveMode.LOGARITHMIC: return np.log10(direction * 9 + 1)
+            case CurveMode.LINEAR: 
+                return direction
+            case CurveMode.SIGMOID: 
+                return 1 / (1 + np.exp(-10 * (direction - 0.5)))
+            case CurveMode.EXPONENTIAL: 
+                return direction**2
+            case CurveMode.LOGARITHMIC: 
+                return np.log10(direction * 9 + 1)
             case _:
                 print("[ERROR] Curve mode not implemented!")
                 exit(1)
     
-    def morpha(self, direction: float, morph_curve: CurveMode) -> NDArray[np.float32]:
+    def __distance_based_rir(self, rir: NDArray[np.float64], rho: float) -> NDArray[np.float64]:
+        factor = self.geometric_attenuation.calculate_geometric_attenuation(source_distance=self.source_distance, distance=rho)
+        filtered = self.iso9613.air_absorption_filter(frame=rir, alpha_absortion=self.db_attenuation, distance=rho - max(self.source_distance, ETA)) * factor
+        return filtered
+    
+    def morpha(self, direction: float, morph_curve: CurveMode, distance: float) -> NDArray[np.float32]:
         """
         RIRs MORPHING
 
@@ -141,6 +161,7 @@ class RIRMorpha():
         yspectrum = (sx * self.source1 + cx * self.morphed + dx * self.source2) * 0.5
         y = np.fft.irfft(yspectrum)
         y /= np.max(np.abs(y) + 1e-12)
+        y = self.__distance_based_rir(rir=y, rho=distance)
         return y
     
     def __get_data_plot(self, rir: NDArray[np.float32]) -> PlotData:
