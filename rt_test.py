@@ -128,7 +128,7 @@ def main() -> None:
     stream.close()
     PORTAUDIO.terminate()
     
-    sf.write("leftblack.wav", audio[:, 0], SR, "PCM_24")
+    # sf.write("leftblack.wav", audio[:, 0], SR, "PCM_24")
 
 # [MAIN PROGRAM]: if the module is being run as the main program, it calls the "main()" function
 if __name__ == "__main__":
