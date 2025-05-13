@@ -43,9 +43,6 @@ def main() -> None:
     
     # pass the rirs
     AURALIZER.set_rirs(rir1=10, rir2=70, smooth_factor=0.1)
-    
-    # start parallel process for space data calculation
-    AURALIZER.start_space_data_process()
 
     # audio engine
     PORTAUDIO = pa.PyAudio()
@@ -94,8 +91,8 @@ def main() -> None:
             AURALIZER.set_position(position=pos)
             
             if curr_time % 2 == 0:
-                current_theta += 45
                 current_phi += 45
+                current_theta += 45
                 # print(curr_ele, curr_azi, curr_rho)
             curr_time += 1
             
@@ -103,13 +100,13 @@ def main() -> None:
             AURALIZER.set_morph_data(direction=0.5, morph_curve=CurveMode.LINEAR)
 
             # generates kernels (HRIR and RIR)
-            kernels = AURALIZER.get_rir_and_hrir()
+            kernels = AURALIZER.get_kernels()
             if kernels is not None:
 
                 # auralization
                 convolved_frame = AURALIZER.process_frame(frame=frame, kernels=kernels)
                 stream.write(convolved_frame.tobytes())
-                audio = np.concatenate((audio, convolved_frame), axis=0)
+                # audio = np.concatenate((audio, convolved_frame), axis=0)
 
                 mark += CHUNK
             else:

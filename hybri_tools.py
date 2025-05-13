@@ -113,6 +113,11 @@ class AirData():
         self.humidity = humidity
         self.pressure = pressure / 101325.0
 
+class HBuilded():
+    def __init__(self, hrir: NDArray[np.float64], itd: float):
+        self.hrir = hrir
+        self.itd = itd
+
 @njit()
 def multiply_spectrum(x: NDArray[np.complex64], y: NDArray[np.complex64]) -> NDArray[np.complex64]:
     return x * y

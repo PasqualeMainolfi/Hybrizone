@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 from matplotlib import gridspec
 import scipy as sp
 from concurrent.futures import ThreadPoolExecutor
-from hybri_tools import AirData, ISO9613Filter, GeometricAttenuation, GAMMA, ETA, CoordMode, PolarPoint, InterpolationDomain, BuildMode
+from hybri_tools import AirData, ISO9613Filter, GeometricAttenuation, GAMMA, ETA, CoordMode, PolarPoint, InterpolationDomain, BuildMode, HBuilded
 
 class HrirHDFData():
     def __init__(self, dataset_path: str, coord_mode: CoordMode):
@@ -96,7 +96,7 @@ class HRIRBuilder():
         self.iso9613 = ISO9613Filter(air_data=air_data, fs=self.fs)
         self.db_attenuation = self.iso9613.get_attenuation_air_absorption()
     
-    def __interpolated_hrir(self, hrirs_info: HInfo, method: BuildMode, mode: InterpolationDomain) -> NDArray[np.float32]:
+    def __interpolated_hrir(self, hrirs_info: HInfo, method: BuildMode, mode: InterpolationDomain) -> HBuilded:
         h = hrirs_info.hrirs if mode == InterpolationDomain.TIME else hrirs_info.hrtfs
         
         interpolated_freq = None
@@ -105,12 +105,12 @@ class HRIRBuilder():
 
         min_arg = np.argmin(hrirs_info.distances)
         if hrirs_info.distances[min_arg] < 1e-6:
-            return hrirs_info.hrirs[min_arg]
+            return HBuilded(hrir=hrirs_info.hrirs[min_arg], itd=hrirs_info.itds[min_arg])
         
         match method:
                         
             case BuildMode.INVERSE_DISTANCE | BuildMode.LINEAR_INVERSE_DISTANCE:
-                w = 1 / hrirs_info.distance ** 2 if method == BuildMode.INVERSE_DISTANCE else 1 / hrirs_info.distance
+                w = 1 / hrirs_info.distances ** 2 if method == BuildMode.INVERSE_DISTANCE else 1 / hrirs_info.distances
                 w /= np.sum(w)
                 
                 interpolated_itd = np.sum([w[i] * hrirs_info.itds[i] for i in range(hrirs_info.n_neighs)])
@@ -164,7 +164,7 @@ class HRIRBuilder():
             
             result = np.column_stack((left, right)).astype(np.float32)
         
-        return result
+        return HBuilded(hrir=result, itd=interpolated_itd)
     
         
     def __distance_based_hrir(self, hrir: NDArray[np.float64], rho: float) -> NDArray[np.float64]:
@@ -199,6 +199,8 @@ class HRIRBuilder():
         
         """
         
+        neighs = neighs if neighs >= 2 else 2
+        
         point.rho = max(point.rho, ETA)
         self.__p = point
         
@@ -216,20 +218,11 @@ class HRIRBuilder():
             n_neighs=neighs
         )
         
+        print("------")
         for i, min_index in enumerate(indices):
             coord = self.dataset.get_polar_reference(index=min_index)
-            elev, azim = None, None
-            
-            if self.mode == CoordMode.INTERAURAL:
-                c = self.dataset.get_cartesian_reference(index=min_index)
-                x, y, z = c[0], c[1], c[2]
-                elev_temp = np.arctan2(z, y)
-                azim_temp = np.arcsin(x)
-
-                elev = np.rad2deg(elev_temp)
-                azim = np.rad2deg(azim_temp) if y >= 0.0 else np.rad2deg(azim_temp) + 180
-            else:
-                azim, elev = coord
+            azim, elev = coord
+            print(f"[DEBUG] phi: {elev} | theta: {azim}")
                 
             key = f"{int(elev)}:{int(azim)}"
             hinfo.hrirs[i, :, :] = self.dataset.get_hrir(key=key)[:]
@@ -237,6 +230,7 @@ class HRIRBuilder():
             hinfo.itds[i] = self.dataset.get_itd(key=key)
             hinfo.coords[i] = np.array([int(elev), int(azim)])
             hinfo.distances = distances
+        print("------")
             
         return hinfo
     
@@ -261,11 +255,10 @@ class HRIRBuilder():
             interpolated distance based hrir left and right channel
         """
         
-        if hrirs_info.n_neighs == 1: 
-            return self.__distance_based_hrir(hrir=hrirs_info.hrirs, rho=hrirs_info.target.rho)
-        
         interpolated = self.__interpolated_hrir(hrirs_info=hrirs_info, method=method, mode=self.interp_domain)
-        return self.__distance_based_hrir(hrir=interpolated, rho=hrirs_info.target.rho)
+        dhrir = self.__distance_based_hrir(hrir=interpolated.hrir, rho=hrirs_info.target.rho) 
+        interpolated.hrir = dhrir
+        return interpolated
     
     def plot_hrir(self, data: NDArray[np.float64], title: str) -> None:
         sr = self.fs

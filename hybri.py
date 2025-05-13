@@ -1,18 +1,14 @@
 import scipy.signal
 import scipy.special
 import hrir_builder as hrb
-from hybri_tools import CoordMode, PolarPoint, BuildMode, InterpolationDomain, AirData, CurveMode
+from hybri_tools import CoordMode, PolarPoint, BuildMode, InterpolationDomain, AirData, CurveMode, HBuilded
 from hybri_tools import AngleMode # noqa
 from hrir_builder import HInfo
-from rir_builder import MorpData
 import rir_builder as rib
 import numpy as np
 from numpy.typing import NDArray
 import scipy
-from threading import Thread, Event
 from concurrent.futures import ThreadPoolExecutor
-from queue import Queue
-import time
 
 TRANSITION_FACTOR = 2 ** 4
 SOFT_CLIP_SCALE = 1.0 / 0.707
@@ -103,9 +99,10 @@ class RTOverlapSaveBufferConvolution():
         return convolved
 
 class HybriKernels():
-    def __init__(self, rir: NDArray[np.float32] | None, hrir: NDArray[np.float32]):
+    def __init__(self, rir: NDArray[np.float32] | None, hrir: NDArray[np.float32], itd = float):
         self.rir = rir
         self.hrir = hrir
+        self.itd = itd
 
 class Hybrizone():
 
@@ -124,33 +121,16 @@ class Hybrizone():
 
         self.__hrir_left_buffer = RTOverlapSaveBufferConvolution(chunk=self.__params.chunk_size)
         self.__hrir_right_buffer = RTOverlapSaveBufferConvolution(chunk=self.__params.chunk_size)
-
-        self.__cache_positions = {} # implement delete old data to avoid memory problems
-        self.__ppoints = Queue()
-        self.__hrirs_cache = Queue()
-
-        self.__cache_morph_data = {} # implement delete old data to avoid memory problems
-        self.__morph_data = Queue()
-        self.__rirs_cache = Queue()
-
-        self.__space_process_is_alive = Event()
-        self.__space_process = None
+        
+        self.__temp_hrir = None
+        self.__temp_rho = None
+        self.__temp_rir = None
 
     def close(self) -> None:
         """
         CLOSE HYBRIZONE
         """
         print("[INFO] Close Hybrizone...")
-
-        print("[INFO] Terminate space process")
-        self.__space_process_is_alive.set()
-        time.sleep(0.1)
-
-        if self.__space_process is not None:
-            self.__space_process.join()
-
-        time.sleep(0.1)
-
         print("[INFO] Free memory")
         self.hrir_builder.close()
         if self.rir_builder is not None:
@@ -188,166 +168,17 @@ class Hybrizone():
         convolved = np.column_stack((left_hrir, right_hrir)).astype(np.float32)
         return np.tanh(convolved * SOFT_CLIP_SCALE)
 
-    def __start_space_data_process(self) -> None:
-        while not self.__space_process_is_alive.is_set():
-
-            condition = not self.__ppoints.empty()
-            if self.rir_builder is not None:
-                condition = not self.__ppoints.empty() and not self.__morph_data.empty()
-
-            position = None
-            match self.rir_builder:
-                case None:
-                    if condition:
-                        position = self.__ppoints.get()
-                        pkey = position._get_hash()
-
-                        check_hrir = self.__cache_positions.get(pkey)
-
-                        hrir = None
-                        if check_hrir:
-                            hrir = check_hrir
-
-                        else:
-                            hrirs = self.query_hrirs(spatial_position=position, n_neighs=self.__params.interpolation_neighs)
-                            hrir = self.build_distance_based_hrir(hrirs=hrirs)
-
-                        self.__hrirs_cache.put(hrir)
-
-                case _:
-                    if condition:
-                        position = self.__ppoints.get()
-                        morph = self.__morph_data.get()
-                        pkey = position._get_hash()
-                        mkey = morph._get_hash()
-
-                        check_hrir, check_rir = self.__cache_positions.get(pkey), self.__cache_morph_data.get(mkey)
-
-                        hrir, rir = None, None
-                        if check_hrir and check_rir:
-                            hrir = check_hrir
-                            rir = check_rir
-
-                        elif check_hrir:
-                            hrir = check_hrir
-                            rir = self.build_hybrid_space(direction=morph.direction, morph_curve=morph.morph_curve, rho=position.rho)
-
-                        elif check_rir:
-                            hrirs = self.query_hrirs(spatial_position=position, n_neighs=self.__params.interpolation_neighs)
-                            hrir = self.build_distance_based_hrir(hrirs=hrirs)
-                            rir = check_rir
-
-                        else:
-                            hrirs = self.query_hrirs(spatial_position=position, n_neighs=self.__params.interpolation_neighs)
-
-                            with ThreadPoolExecutor(max_workers=2) as calculator:
-                                hrir_distance_based = calculator.submit(self.build_distance_based_hrir, hrirs)
-                                rir_calculated = calculator.submit(self.build_hybrid_space, morph.direction, morph.morph_curve, position.rho)
-                                hrir = hrir_distance_based.result()
-                                rir = rir_calculated.result()
-
-                        self.__hrirs_cache.put(hrir)
-                        self.__rirs_cache.put(rir)
-
-            time.sleep(1 / self.__params.fs)
-
-    def start_space_data_process(self) -> None:
-        """
-        START RIR AND HRIR PARALLEL CALCULATION PROCESS
-
-        Returns
-        -------
-            process in which the program calculates RIR and HRIR params-based.
-        """
-
-        self.__space_process = Thread(target=self.__start_space_data_process, daemon=True)
-        self.__space_process.start()
-        print("[INFO] SPACE PROCESS STARTED!")
-
     def set_position(self, position: PolarPoint) -> None:
-        """
-        SET CURRENT POSITION
-
-        Parameters
-        ----------
-        position : PolarPoint
-            current position
-
-        """
-
-        if self.__space_process is None:
-            print("[INFO] None space process. Run .start_space_data_process() method first!")
-            exit(1)
-
-        self.__ppoints.put(position)
-
+        hrirs = self.query_hrirs(spatial_position=position, n_neighs=self.__params.interpolation_neighs)
+        self.__temp_hrir = self.build_distance_based_hrir(hrirs=hrirs)
+        self.__temp_rho = position.rho
+    
     def set_morph_data(self, direction: float, morph_curve: CurveMode) -> None:
-        """
-        SET CURRENT HYBRID SPACE
-
-        Parameters
-        ----------
-        direction : float
-            morph direction
-        morph_curve : CurveMode
-            morph curve
-
-        """
-
-        if self.__space_process is None:
-            print("[INFO] None space process. Run .start_space_data_process() method first!")
-            exit(1)
-
-        self.__morph_data.put(MorpData(direction=direction, morph_curve=morph_curve))
-
-
-    def get_rir_and_hrir(self) -> HybriKernels|None:
-        """
-        GET GENERATED RIR AND HRIR
-
-        Returns
-        -------
-        HybriKernels|None
-            kernels or None
-        """
-
-        match self.rir_builder:
-            case None:
-                if self.__hrirs_cache.empty():
-                    return None
-
-                hrir = self.__hrirs_cache.get()
-                k = HybriKernels(rir=None, hrir=hrir)
-                if not isinstance(k, HybriKernels):
-                    return None
-                return k
-            case _:
-                if self.__hrirs_cache.empty() or self.__rirs_cache.empty():
-                    print("[WARNING] Empty cache!")
-                    if not self.__ppoints.empty():
-                        print("[WARNING] Searching pos...")
-                        k = None
-                        time_process = time.time()
-                        while k is None:
-                            hrir = self.__hrirs_cache.get()
-                            rir = self.__rirs_cache.get()
-                            k = HybriKernels(rir=rir, hrir=hrir)
-                            if not isinstance(k, HybriKernels):
-                                k = None
-                            if time.time() - time_process >= 0.1:
-                                return None
-                        return k
-                    return None
-
-                hrir = self.__hrirs_cache.get()
-                rir = self.__rirs_cache.get()
-                k = HybriKernels(rir=rir, hrir=hrir)
-                if not isinstance(k, HybriKernels):
-                    return None
-                return k
-
-        return k
-
+        self.__temp_rir = self.build_hybrid_space(direction=direction, morph_curve=morph_curve, rho=self.__temp_rho)
+        
+    def get_kernels(self) -> HybriKernels:
+        return HybriKernels(rir=self.__temp_rir, hrir=self.__temp_hrir.hrir, itd=self.__temp_hrir.itd)
+    
     # --- START HRIR SECTION ---
 
     def imposed_air_conditions(self, air_data: AirData) -> None:
@@ -363,6 +194,7 @@ class Hybrizone():
         self.hrir_builder.set_air_conditions(air_data=air_data)
         if self.rir_builder is not None:
             self.rir_builder.set_air_conditions(air_data=air_data)
+
 
     def query_hrirs(self, spatial_position: PolarPoint, n_neighs: int) -> HInfo:
         """
@@ -383,7 +215,7 @@ class Hybrizone():
 
         return self.hrir_builder.prepare_hrirs(point=spatial_position, neighs=n_neighs)
 
-    def build_distance_based_hrir(self, hrirs: HInfo) -> NDArray[np.float32]:
+    def build_distance_based_hrir(self, hrirs: HInfo) -> HBuilded:
         """
         BUILD HRIR FROM HInfo (SELECTED HRIRs)
 
@@ -394,8 +226,9 @@ class Hybrizone():
 
         Returns
         -------
-        NDArray[np.float32]
-            builded hrir
+        HBuilded : 
+            hrir, itd
+        
         """
 
         return self.hrir_builder.build_hrir(hrirs_info=hrirs, method=self.__params.build_mode)
