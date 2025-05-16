@@ -14,7 +14,7 @@ TRANSITION_FACTOR = 2 ** 4
 SOFT_CLIP_SCALE = 1.0 / 0.707
 
 class SmoothedConvolution():
-
+    
     @staticmethod
     def apply_intermediate(x: NDArray[np.float32], prev_kernel: NDArray[np.float32], curr_kernel: NDArray[np.float32], transition_length: int) -> NDArray[np.float32]:
         ksize = max(prev_kernel.size, curr_kernel.size)
@@ -31,6 +31,22 @@ class SmoothedConvolution():
             rest_part = scipy.signal.fftconvolve(x[transition_length:], kernel_padded, mode="full")
             smoothed[transition_length:transition_length + rest_part.size] += rest_part
         return smoothed
+    
+    @staticmethod
+    def kernel_blending(prev_kernel: NDArray[np.float64], curr_kernel: NDArray[np.float64], chunk_size: int) -> NDArray[np.float64]:
+        if prev_kernel is None:
+            return curr_kernel
+        assert len(prev_kernel) == len(curr_kernel), "[ERROR] Kernels must have same length!"
+        n = len(prev_kernel)
+        transition_length = int(np.ceil(chunk_size / TRANSITION_FACTOR))
+        result = np.zeros(transition_length + n - 1, dtype=np.float64)
+        for i in range(transition_length):
+            alpha = float(i / (transition_length - 1))
+            print(alpha)
+            crossed = (1 - alpha) * prev_kernel + alpha * curr_kernel
+            result[i:i + n] += crossed
+        return result[:n]
+            
 
 class HybriParams():
     def __init__(
@@ -99,10 +115,11 @@ class RTOverlapSaveBufferConvolution():
         return convolved
 
 class HybriKernels():
-    def __init__(self, rir: NDArray[np.float32] | None, hrir: NDArray[np.float32], itd = float):
+    def __init__(self, rir: NDArray[np.float32] | None, hrir: NDArray[np.float32], itd: float, gain: NDArray[np.float64]) -> None:
         self.rir = rir
         self.hrir = hrir
         self.itd = itd
+        self.gain = gain
 
 class Hybrizone():
 
@@ -135,6 +152,9 @@ class Hybrizone():
         self.hrir_builder.close()
         if self.rir_builder is not None:
             self.rir_builder.close()
+        self.__temp_hrir = None
+        self.__temp_rho = None
+        self.__temp_rir = None
         
         print("[INFO] Hybrizone closed!")
 
@@ -177,7 +197,7 @@ class Hybrizone():
         self.__temp_rir = self.build_hybrid_space(direction=direction, morph_curve=morph_curve, rho=self.__temp_rho)
         
     def get_kernels(self) -> HybriKernels:
-        return HybriKernels(rir=self.__temp_rir, hrir=self.__temp_hrir.hrir, itd=self.__temp_hrir.itd)
+        return HybriKernels(rir=self.__temp_rir, hrir=self.__temp_hrir.hrir, itd=self.__temp_hrir.itd, gain=self.__temp_hrir.gain)
     
     # --- START HRIR SECTION ---
 

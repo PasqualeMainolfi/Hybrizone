@@ -23,7 +23,7 @@ PARAMS = HybriParams(
         rir_database_path=RIR_PATH, 
         coord_mode=CoordMode.REGULAR, 
         interp_domain=InterpolationDomain.FREQUENCY,
-        build_mode=BuildMode.LINEAR,
+        build_mode=BuildMode.SPHERICAL,
         chunk_size=CHUNK,
         interpolation_neighs=2
 )
@@ -58,7 +58,7 @@ def main() -> None:
     mark = 0
     curr_time = 0
     back = False
-    dstep = 10
+    dstep = 5
     while True:
         
         try:
@@ -91,8 +91,8 @@ def main() -> None:
             AURALIZER.set_position(position=pos)
             
             if curr_time % 2 == 0:
-                current_phi += 45
-                current_theta += 45
+                current_phi += 5
+                current_theta += 5
                 # print(curr_ele, curr_azi, curr_rho)
             curr_time += 1
             

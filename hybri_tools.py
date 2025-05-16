@@ -5,12 +5,15 @@ from enum import Enum
 import hashlib
 from numba import njit
 
+HEAD_RADIUS = 0.0875 # metri
 SOUND_SPEED = 343.3 # sound speed
 NFREQS = 256 # n freqs for multiband filter
 GAMMA = 0.7 # exponent in distance perception
-ETA = 0.1 # minimum distance threshold
+ETA = HEAD_RADIUS + 0.01 # minimum distance threshold
 MAX_DELAY_SEC = 1 # max delay per sample
 SLEW_RATE = 0.01 # smooth fractional delay
+P_REF = 101325.0
+T0 = 293.15
 
 class CurveMode(Enum):
     LINEAR = 0
@@ -30,6 +33,7 @@ class BuildMode(Enum):
     INVERSE_DISTANCE = 1
     LINEAR_INVERSE_DISTANCE = 2
     LINEAR = 3
+    SPHERICAL = 4
     
 class InterpolationDomain(Enum):
     TIME = 0
@@ -111,12 +115,13 @@ class AirData():
         
         self.kelvin = temperature + 273.15
         self.humidity = humidity
-        self.pressure = pressure / 101325.0
+        self.pressure = pressure / P_REF
 
 class HBuilded():
-    def __init__(self, hrir: NDArray[np.float64], itd: float):
+    def __init__(self, hrir: NDArray[np.float64], itd: float, gain: NDArray[np.float64]):
         self.hrir = hrir
         self.itd = itd
+        self.gain = gain
 
 @njit()
 def multiply_spectrum(x: NDArray[np.complex64], y: NDArray[np.complex64]) -> NDArray[np.complex64]:
@@ -126,33 +131,48 @@ class ISO9613Filter():
     def __init__(self, air_data: AirData, fs: float):
         self.air_data = air_data
         self.fs = fs
-        self.frequencies = np.linspace(0, fs / 2, NFREQS)
+        self.frequencies = np.linspace(0, self.fs / 2, NFREQS)
         self.fnorm = self.frequencies / (self.fs / 2) # normalized
     
-    def get_attenuation_air_absorption(self) -> NDArray[np.float32]:
-        h = self.air_data.humidity * 10 ** ((-6.8346 * (273.16 / self.air_data.kelvin) ** 1.261) + 4.6151)
+    def get_attenuation_air_absorption(self) -> NDArray[np.float64]:
+        p_sat = P_REF * (10 ** (-6.8346 * (273.16 / self.air_data.kelvin) ** 1.261 + 4.6151))
+        h = self.air_data.humidity * (p_sat / (self.air_data.pressure * P_REF))
+        tr = self.air_data.kelvin / T0
+        tr_pos = tr ** 0.5
+        tr_neg = tr ** -0.5
         
         # Frequenze di rilassamento per ossigeno e azoto (Hz)
-        f_rO = self.air_data.pressure * (24.0 + 4.04e4 * h * (0.02 + h) / (0.391 + h)) / 1000.0
-        f_rN = self.air_data.pressure * (9.0 + 280.0 * h * np.exp(-4.17 * ((self.air_data.kelvin / 293.0) - 1))) / 1000.0
+        f_rO = self.air_data.pressure * (24.0 + 4.04e4 * h * (0.02 + h) / (0.391 + h))
+        f_rN = self.air_data.pressure * tr_neg * (9.0 + 280.0 * h * np.exp(-4.17 * (tr ** (-1 / 3.0) - 1.0)))
         
         # Calcolo del coefficiente di assorbimento in dB/m
-        freq_kHz = self.frequencies / 1000.0  # conversione in kHz
-        freq_kHz = freq_kHz ** 2
+        freq_squared = self.frequencies  ** 2
         
         # Termine per l'assorbimento classico (viscosità e conduzione termica)
-        alpha_classical = 1.84e-11 * (self.air_data.pressure) ** (-1) * np.sqrt(self.air_data.kelvin / 293.15) * freq_kHz
+        alpha_classical = (
+            1.84e-11 
+            * (1 / self.air_data.pressure) 
+            * tr_pos
+        )
         
         # Termine per il rilassamento dell'ossigeno
-        alpha_oxygen = 0.01275 * np.exp(-2239.1 / self.air_data.kelvin) * freq_kHz / (f_rO + (freq_kHz / f_rO))
+        alpha_oxygen = (
+            0.01275 
+            * np.exp(-2239.1 / self.air_data.kelvin) 
+            * (f_rO + (freq_squared / f_rO)) ** -1
+        )
         
         # Termine per il rilassamento dell'azoto
-        alpha_nitrogen = 0.1068 * np.exp(-3352.0 / self.air_data.kelvin) * freq_kHz / (f_rN + (freq_kHz / f_rN))
+        alpha_nitrogen = (
+            0.1068 
+            * np.exp(-3352.0 / self.air_data.kelvin) 
+            * (f_rN + (f_rN ** 2 + freq_squared)) ** -1
+        )
         
         # Coefficiente di assorbimento totale (in dB/m)
-        alpha = alpha_classical + alpha_oxygen + alpha_nitrogen
-        
-        return alpha.astype(np.float32)
+        alpha_term = alpha_classical + tr ** (-2.5) * (alpha_oxygen + alpha_nitrogen)
+        alpha = 8.686 * freq_squared * alpha_term
+        return alpha.astype(np.float64)
     
     def multiband_fft_filter(self, frame: NDArray[np.float32], attenuation: NDArray[np.float32]):
         # frame is hrir
@@ -178,7 +198,7 @@ class ISO9613Filter():
     def air_absorption_filter(self, frame: NDArray[np.float64], alpha_absortion: NDArray[np.float64], distance: float) -> NDArray[np.float64]:
         relative_distance = distance if distance > 0 else 0
         db_attenuation = alpha_absortion * relative_distance
-        gain = np.exp2(-db_attenuation / (20 * np.log10(2)))
+        gain = 10 ** (-db_attenuation / 20)
         gain[-1] = 0.0
         filtered = self.multiband_fft_filter(frame=frame, attenuation=gain)
         return filtered
@@ -206,3 +226,12 @@ class GeometricAttenuation():
         original_distance = max(source_distance, ETA)
         factor = (original_distance / distance) ** GAMMA # il fattore di attenuazione è in rapporto con la distanza originale in modo tale da lasciare invariata l'ampiezza alla distanza originale
         return factor
+    
+def woodworth_itd3d(point: PolarPoint) -> float:
+    # theta = (point.theta + np.pi) % (2 * np.pi) - np.pi
+    sin_theta = np.sin(-point.theta)
+    cos_phi = np.cos(point.phi)
+    svalue = point.rho * point.rho + HEAD_RADIUS * HEAD_RADIUS - 2 * HEAD_RADIUS * point.rho * sin_theta * cos_phi
+    num = point.rho + HEAD_RADIUS * sin_theta * cos_phi - np.sqrt(svalue)
+    return num / SOUND_SPEED
+    
