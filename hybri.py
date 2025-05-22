@@ -1,7 +1,7 @@
 import scipy.signal
 import scipy.special
 import hrir_builder as hrb
-from hybri_tools import CoordMode, PolarPoint, BuildMode, InterpolationDomain, AirData, CurveMode, HBuilded
+from hybri_tools import CoordMode, PolarPoint, BuildMode, InterpolationDomain, AirData, CurveMode, HBuilded, RBuilded 
 from hybri_tools import AngleMode # noqa
 from hrir_builder import HInfo
 import rir_builder as rib
@@ -9,44 +9,42 @@ import numpy as np
 from numpy.typing import NDArray
 import scipy
 from concurrent.futures import ThreadPoolExecutor
+import time
+from numba import njit
 
-TRANSITION_FACTOR = 2 ** 4
+TRANSITION_FACTOR = 0.5
+MAX_TRANSITION_SAMPLES = 512
 SOFT_CLIP_SCALE = 1.0 / 0.707
+
+@njit(cache=True)
+def intermediate_segment(x: NDArray[np.float64], k1: NDArray[np.float64], k2: NDArray[np.float64], ksize: int, tlength: int) -> NDArray[np.float64]:
+    segment = np.zeros(x.size + ksize - 1, dtype=np.float64)
+    for i in range(tlength):
+        alpha = float(i) / (tlength - 1.0)
+        crossed = (1.0 - alpha) * k1 + alpha * k2
+        current_x_sample = x[i]
+        for k_idx in range(ksize):
+            segment[i + k_idx] += current_x_sample * crossed[k_idx]
+    return segment
 
 class SmoothedConvolution():
     
     @staticmethod
-    def apply_intermediate(x: NDArray[np.float32], prev_kernel: NDArray[np.float32], curr_kernel: NDArray[np.float32], transition_length: int) -> NDArray[np.float32]:
+    def apply_intermediate(x: NDArray[np.float64], prev_kernel: NDArray[np.float64]|None, curr_kernel: NDArray[np.float64], transition_length: int) -> NDArray[np.float64]:
+        if prev_kernel is None:
+            return scipy.signal.fftconvolve(x, curr_kernel, mode="full")
+        
         ksize = max(prev_kernel.size, curr_kernel.size)
-        smoothed = np.zeros(x.size + ksize - 1, dtype=np.float32)
+        total_size = x.size + ksize - 1
         prev_kernel = np.pad(prev_kernel, (0, ksize - prev_kernel.size), mode="constant")
         kernel_padded = np.pad(curr_kernel, (0, ksize - curr_kernel.size), mode="constant")
-
-        transition_length = min(transition_length, smoothed.size)
-        for i in range(transition_length):
-            alpha = float(i / (transition_length - 1))
-            crossed = (1 - alpha) * prev_kernel + alpha * kernel_padded
-            smoothed[i:i + ksize] += x[i] * crossed
+        
+        transition_length = min(transition_length, total_size)
+        smoothed = intermediate_segment(x=x, k1=prev_kernel, k2=kernel_padded, ksize=ksize, tlength=transition_length)
         if transition_length < x.size:
             rest_part = scipy.signal.fftconvolve(x[transition_length:], kernel_padded, mode="full")
             smoothed[transition_length:transition_length + rest_part.size] += rest_part
         return smoothed
-    
-    @staticmethod
-    def kernel_blending(prev_kernel: NDArray[np.float64], curr_kernel: NDArray[np.float64], chunk_size: int) -> NDArray[np.float64]:
-        if prev_kernel is None:
-            return curr_kernel
-        assert len(prev_kernel) == len(curr_kernel), "[ERROR] Kernels must have same length!"
-        n = len(prev_kernel)
-        transition_length = int(np.ceil(chunk_size / TRANSITION_FACTOR))
-        result = np.zeros(transition_length + n - 1, dtype=np.float64)
-        for i in range(transition_length):
-            alpha = float(i / (transition_length - 1))
-            print(alpha)
-            crossed = (1 - alpha) * prev_kernel + alpha * curr_kernel
-            result[i:i + n] += crossed
-        return result[:n]
-            
 
 class HybriParams():
     def __init__(
@@ -95,27 +93,24 @@ class HybriParams():
 
 class RTOverlapSaveBufferConvolution():
     def __init__(self, chunk: int):
-        self.buffer = np.empty(0, dtype=np.float32)
+        self.buffer = np.empty(0, dtype=np.float64)
         self.chunk = chunk
         self.pkernel = None
-        self.transition_size = int(self.chunk / TRANSITION_FACTOR)
+        self.pbuffer = None
+        self.transition_size = int(chunk * TRANSITION_FACTOR) if chunk < 2048 else MAX_TRANSITION_SAMPLES
 
-    def process(self, x: NDArray[np.float32], kernel: NDArray[np.float32]) -> NDArray[np.float32]:
-
-        convolution = scipy.signal.fftconvolve(x, kernel, mode="full")
-        if self.pkernel is not None:
-            convolution = SmoothedConvolution.apply_intermediate(x=x, prev_kernel=self.pkernel, curr_kernel=kernel, transition_length=self.transition_size)
-
-        self.pkernel = kernel
+    def process(self, x: NDArray[np.float64], kernel: NDArray[np.float64]) -> NDArray[np.float64]:
+        convolution = SmoothedConvolution.apply_intermediate(x=x, prev_kernel=self.pkernel, curr_kernel=kernel, transition_length=self.transition_size)
+        self.pkernel = kernel.copy()
 
         max_lenght = min(self.buffer.size, convolution.size)
         convolution[:max_lenght] += self.buffer[:max_lenght]
-        convolved = convolution[:self.chunk].astype(np.float32)
+        convolved = convolution[:self.chunk].astype(np.float64)
         self.buffer = convolution[self.chunk:]
         return convolved
 
 class HybriKernels():
-    def __init__(self, rir: NDArray[np.float32] | None, hrir: NDArray[np.float32], itd: float, gain: NDArray[np.float64]) -> None:
+    def __init__(self, rir: NDArray[np.float64] | None, hrir: NDArray[np.float64], itd: float, gain: NDArray[np.float64]) -> None:
         self.rir = rir
         self.hrir = hrir
         self.itd = itd
@@ -142,6 +137,13 @@ class Hybrizone():
         self.__temp_hrir = None
         self.__temp_rho = None
         self.__temp_rir = None
+        
+        self.__cache_hrir = {}
+        
+        self.__htime = 0.0
+        self.__rtime = 0.0
+        self.__ptime = 0.0
+        self.__counter = 1
 
     def close(self) -> None:
         """
@@ -156,25 +158,31 @@ class Hybrizone():
         self.__temp_rho = None
         self.__temp_rir = None
         
+        self.__htime = 0.0
+        self.__rtime = 0.0
+        self.__ptime = 0.0
+        self.__counter = 1
+        
         print("[INFO] Hybrizone closed!")
 
-    def process_frame(self, frame: NDArray[np.float32], kernels: HybriKernels) -> NDArray[np.float32]:
+    def process_frame(self, frame: NDArray[np.float64], kernels: HybriKernels) -> NDArray[np.float32]:
         """
         APPLY RIR AND HRIR
 
         Parameters
         ----------
-        frame : NDArray[np.float32]
+        frame : NDArray[np.float64]
             frame to be process
         kernels : HybriKernels
             RIR and HRIR kernel
 
         Returns
         -------
-        NDArray[np.float32]
+        NDArray[np.float64]
             frame processed
         """
 
+        tstart = time.perf_counter()
         mono = frame
         if kernels.rir is not None:
             mono = self.__rir_buffer.process(x=frame, kernel=kernels.rir)
@@ -186,18 +194,42 @@ class Hybrizone():
             right_hrir = lr.result()
 
         convolved = np.column_stack((left_hrir, right_hrir)).astype(np.float32)
+        tend = time.perf_counter()
+        self.__ptime += tend - tstart
+        self.__counter += 1
         return np.tanh(convolved * SOFT_CLIP_SCALE)
 
     def set_position(self, position: PolarPoint) -> None:
-        hrirs = self.query_hrirs(spatial_position=position, n_neighs=self.__params.interpolation_neighs)
-        self.__temp_hrir = self.build_distance_based_hrir(hrirs=hrirs)
+        pkey = position._get_hash()
+
+        if pkey in self.__cache_hrir:
+            self.__temp_hrir = self.__cache_hrir[pkey]
+        else:
+            tstart = time.perf_counter()
+            hrirs = self.query_hrirs(spatial_position=position, n_neighs=self.__params.interpolation_neighs)
+            temp_hrir = self.build_distance_based_hrir(hrirs=hrirs)
+            tend = time.perf_counter()
+            self.__htime += tend - tstart            
+            self.__cache_hrir[pkey] = temp_hrir
+            self.__temp_hrir = temp_hrir
+
         self.__temp_rho = position.rho
     
     def set_morph_data(self, direction: float, morph_curve: CurveMode) -> None:
+        tstart = time.perf_counter()
         self.__temp_rir = self.build_hybrid_space(direction=direction, morph_curve=morph_curve, rho=self.__temp_rho)
+        tend = time.perf_counter()
+        self.__rtime += tend - tstart
         
     def get_kernels(self) -> HybriKernels:
         return HybriKernels(rir=self.__temp_rir, hrir=self.__temp_hrir.hrir, itd=self.__temp_hrir.itd, gain=self.__temp_hrir.gain)
+    
+    def get_proc_times(self) -> dict:
+        return {
+            "htime": self.__htime / self.__counter,
+            "rtime": self.__rtime / self.__counter,
+            "ptime": self.__ptime / self.__counter
+        }
     
     # --- START HRIR SECTION ---
 
@@ -253,13 +285,13 @@ class Hybrizone():
 
         return self.hrir_builder.build_hrir(hrirs_info=hrirs, method=self.__params.build_mode)
 
-    def display_hrir(self, hrir: NDArray[np.float32], title: str) -> None:
+    def display_hrir(self, hrir: NDArray[np.float64], title: str) -> None:
         """
         PLOT HRIR ANALYSIS
 
         Parameters
         ----------
-        hrir : NDArray[np.float32]
+        hrir : NDArray[np.float64]
             hrir
         title : str
             plot title
@@ -285,7 +317,11 @@ class Hybrizone():
             spectral envelope smooth factor, by default 0.1
         """
 
+        tstart = time.perf_counter()
         self.rir_builder.set_rirs(rir1=rir1, rir2=rir2, smooth_factor=smooth_factor)
+        tend = time.perf_counter()
+        self.__rtime += tend - tstart
+        self.__ptime += tend - tstart
 
     def set_rir1(self, rir1: int) -> None:
         """
@@ -325,7 +361,7 @@ class Hybrizone():
             RIR name
         """
 
-        return self.rir_builder.rirs.attrs["IR-keys"][rir_index]
+        return self.rir_builder.dataset.attrs["IR-keys"][rir_index]
 
     def set_smooth_factor(self, smooth_factor: float) -> None:
         """
@@ -339,7 +375,7 @@ class Hybrizone():
 
         self.rir_builder.set_smooth_factor(smooth_factor=smooth_factor)
 
-    def build_hybrid_space(self, direction: float, morph_curve: CurveMode, rho: float) -> NDArray[np.float32]:
+    def build_hybrid_space(self, direction: float, morph_curve: CurveMode, rho: float) -> NDArray[np.float64]:
         """
         BUILD HYBRID SPACE
 
@@ -352,19 +388,19 @@ class Hybrizone():
 
         Returns
         -------
-        NDArray[np.float32]
+        NDArray[np.float64]
             RIR
         """
 
         return self.rir_builder.morpha(direction=direction, morph_curve=morph_curve, distance=rho)
 
-    def display_rir(self, rir: int|NDArray[np.float32], title: str|None = None) -> None:
+    def display_rir(self, rir: int|NDArray[np.float64], title: str|None = None) -> None:
         """
         _summary_
 
         Parameters
         ----------
-        rir : int | NDArray[np.float32]
+        rir : int | NDArray[np.float64]
             RIR defined starting from database index or data array
         title : str | None, optional
             plot title. If rir=int plot title will be the RIR key, by default None
@@ -372,4 +408,11 @@ class Hybrizone():
 
         self.rir_builder.plot_rir(rir=rir, title=title)
 
+    def get_rir(self, key: str) -> NDArray[np.float64]:
+        return self.rir_builder.dataset[key][:]
+
+    def get_rir_data(self, rir: NDArray[np.float64]) -> RBuilded:
+        data = self.rir_builder._get_data_plot(rir=rir)
+        return RBuilded(rir=rir, power_spectrum=data.mag, freqs=data.f, integr=data.integr)
+    
     # --- END RIR SECTION ---

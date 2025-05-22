@@ -4,7 +4,8 @@ import h5py
 import matplotlib.pyplot as plt
 from matplotlib import gridspec
 import hashlib
-from hybri_tools import ISO9613Filter, GeometricAttenuation, AirData, ETA, CurveMode
+from hybri_tools import ISO9613Filter, GeometricAttenuation, AirData, ETA, CurveMode, RData, cross_fade, INTERNAL_KERNEL_TRANSITION, MAX_DISTANCE_TRANSITION
+from numba import njit
 
 class PlotData():
     def __init__(self, t: NDArray[np.float32], f: NDArray[np.float32], mag: NDArray[np.float32], integr: NDArray[np.float32]):
@@ -21,6 +22,14 @@ class MorpData():
     def _get_hash(self):
         return hashlib.md5(f"{self.direction}-{self.morph_curve}".encode()).hexdigest()
 
+@njit()
+def get_morphed_data(curve_value: float, source1: NDArray[np.complex64], source2: NDArray[np.float64], morphed: NDArray[np.float64]):
+    sx = max(1.0 - 2.0 * curve_value, 0.0)  
+    cx = 1.0 - abs(1.0 - 2.0 * curve_value)
+    dx = max(2.0 * curve_value - 1.0, 0.0)
+    yspectrum = (sx * source1 + cx * morphed + dx * source2) * 0.5
+    return yspectrum
+
 class RIRMorpha():
     def __init__(self, rir_database_path: str, source_distance: float):
         """
@@ -30,22 +39,28 @@ class RIRMorpha():
             path to h5 database
         """
         
-        self.rirs = h5py.File(rir_database_path, "r")
-        self.fs = self.rirs.attrs["fs"]
-        self.source1 = None
-        self.source2 = None
-        self.morphed = None
+        self.dataset = h5py.File(rir_database_path, "r")
+        self.fs = self.dataset.attrs["fs"]
         self.length = None
-        self.__cache = {"r1": None, "r2": None, "sf": None}
         
         self.iso9613 = None
         self.db_attenuation = None
         self.source_distance = source_distance
         
         self.geometric_attenuation = GeometricAttenuation(fs=self.fs, channels=1)
-    
+        
+        self.__cache_rir_builded = {}
+        self.__current_key = None
+
+        self.source1 = None
+        self.source2 = None
+        self.morphed = None
+        self.cache_data = { "r1": None, "r2": None, "sf": None }
+        
+        self.__prev_dist = None
+
     def close(self) -> None:
-        self.rirs.close()
+        self.dataset.close()
     
     def set_air_conditions(self, air_data: AirData) -> None:
         self.iso9613 = ISO9613Filter(air_data=air_data, fs=self.fs)
@@ -65,42 +80,59 @@ class RIRMorpha():
             spectral envelope smooth factor, by default 0.1
         """
         
-        k1 = self.rirs.attrs["IR-keys"][rir1]
-        k2 = self.rirs.attrs["IR-keys"][rir2]
-        source1 = self.rirs[k1][:]
-        source2 = self.rirs[k2][:]
-        n1 = len(source1)
-        n2 = len(source2)
-        if n1 < n2: 
-            source1 = np.pad(source1, (0, n2 - n1), constant_values=0.0, mode="constant")
-        elif n1 > n2: 
-            source2 = np.pad(source2, (0, n1 - n2), constant_values=0.0, mode="constant")
-        self.length = max(n1, n2)
+        self.__current_key = hashlib.md5(f"{rir1}_{rir2}_{smooth_factor}".encode()).hexdigest()
         
-        scep = self.__get_spectral_envelope(source=source1, smooth_factor=smooth_factor)
-        tcep = self.__get_spectral_envelope(source=source2, smooth_factor=smooth_factor)
-        self.source1 = np.fft.rfft(source1)
-        self.source2 = np.fft.rfft(source2)
-        target_flatten = self.source2 / (tcep + 1e-12)
-        self.morphed = scep * target_flatten
-        self.__cache["r1"] = rir1
-        self.__cache["r2"] = rir2
-        self.__cache["sf"] = smooth_factor
-    
+        if self.__current_key not in self.__cache_rir_builded:
+            k1 = self.dataset.attrs["IR-keys"][rir1]
+            k2 = self.dataset.attrs["IR-keys"][rir2]
+            source1 = self.dataset[k1][:]
+            source2 = self.dataset[k2][:]
+            n1 = len(source1)
+            n2 = len(source2)
+            
+            if n1 < n2: 
+                source1 = np.pad(source1, (0, n2 - n1), constant_values=0.0, mode="constant")
+            elif n1 > n2: 
+                source2 = np.pad(source2, (0, n1 - n2), constant_values=0.0, mode="constant")
+            self.length = max(n1, n2)
+            
+            scep = self.__get_spectral_envelope(source=source1, smooth_factor=smooth_factor)
+            tcep = self.__get_spectral_envelope(source=source2, smooth_factor=smooth_factor)
+            source1f = np.fft.rfft(source1)
+            source2f = np.fft.rfft(source2)
+            target_flatten = source2f / (tcep + 1e-12)
+            morphed = scep * target_flatten
+            
+            self.source1 = source1f
+            self.source2 = source2f
+            self.morphed = morphed
+            self.cache_data["r1"] = rir1
+            self.cache_data["r2"] = rir2
+            self.cache_data["sf"] = smooth_factor
+            self.__cache_rir_builded[self.__current_key] = RData(rir1=rir1, rir2=rir2, smooth_factor=smooth_factor, source1=source1f, source2=source2f, morphed=morphed)
+        else:
+            rdata = self.__cache_rir_builded[self.__current_key]
+            self.source1 = rdata.source1
+            self.source2 = rdata.source2
+            self.morphed = rdata.morphed
+            self.cache_data["r1"] = rdata.rir1
+            self.cache_data["r2"] = rdata.rir2
+            self.cache_data["sf"] = rdata.smooth_factor
+            
     def set_rir1(self, rir1: int) -> None:
-        self.set_rirs(rir1=rir1, rir2=self.__cache["r2"], smooth_factor=self.__cache["sf"])
+        self.set_rirs(rir1=rir1, rir2=self.cache_data["r2"], smooth_factor=self.cache_data["sf"])
     
     def set_rir2(self, rir2: int) -> None:
-        self.set_rirs(rir1=self.__cache["r1"], rir2=rir2, smooth_factor=self.__cache["sf"])
+        self.set_rirs(rir1=self.cache_data["r1"], rir2=rir2, smooth_factor=self.cache_data["sf"])
     
     def set_smooth_factor(self, smooth_factor: float) -> None:
-        self.set_rirs(rir1=self.__cache["r1"], rir2=self.__cache["r2"], smooth_factor=smooth_factor)
+        self.set_rirs(rir1=self.cache_data["r1"], rir2=self.cache_data["r2"], smooth_factor=smooth_factor)
         
     def __get_spectral_envelope(self, source: NDArray[np.float32], smooth_factor: float) -> NDArray[np.float32]:
         fft_source = np.fft.rfft(source)
         mag = np.abs(fft_source)
-        log = np.log10(mag)
-        realcp = np.fft.irfft(log + 1e-12).real
+        log = np.log10(mag + 1e-12)
+        realcp = np.fft.irfft(log).real
         realcp = np.fft.rfft(realcp).real
         realcp_mean = np.mean(realcp)
         realcp = np.exp(realcp - realcp_mean)
@@ -148,27 +180,37 @@ class RIRMorpha():
             data rir
         """
         
-        if self.source1 is None or self.source2 is None or self.morphed is None:
+        if self.__current_key is None:
             print("[ERROR] Set RIRs first!")
             exit(1)
-            
+        
         mf = self.__nonlinear_morphing_curve(direction=direction, curve_type=morph_curve)
-        
-        sx = max(1.0 - 2.0 * mf, 0.0)  
-        cx = 1.0 - abs(1.0 - 2.0 * mf)
-        dx = max(2.0 * mf - 1.0, 0.0)
-        
-        yspectrum = (sx * self.source1 + cx * self.morphed + dx * self.source2) * 0.5
+        yspectrum = get_morphed_data(curve_value=mf, source1=self.source1, source2=self.source2, morphed=self.morphed)
         y = np.fft.irfft(yspectrum)
         y /= np.max(np.abs(y) + 1e-12)
-        y = self.__distance_based_rir(rir=y, rho=distance)
+        y_dist = self.__distance_based_rir(rir=y, rho=distance)
+        
+        y = None
+        if self.__prev_dist is not None:
+            d = abs(distance - self.__prev_dist)
+            if d > MAX_DISTANCE_TRANSITION:
+                tlength = int(y_dist.size / INTERNAL_KERNEL_TRANSITION)
+                y = cross_fade(k1=self.__prev_dist_rir, k2=y_dist, tlength=tlength)
+            else:
+                y = y_dist
+        else: 
+            y = y_dist
+            
+        self.__prev_dist = distance
+        self.__prev_dist_rir = y_dist
         return y
+        
     
-    def __get_data_plot(self, rir: NDArray[np.float32]) -> PlotData:
+    def _get_data_plot(self, rir: NDArray[np.float32]) -> PlotData:
         n = len(rir)
         e = np.cumsum(rir[::-1] ** 2)[::-1]
         e /= np.max(e)
-        db = 10 * np.log10(e + 1e-12)
+        db = 20 * np.log10(e + 1e-12)
         mag = np.abs(np.fft.rfft(rir))
         t = np.arange(n) / self.fs
         freqs = np.fft.rfftfreq(len(t), d=1 / self.fs)
@@ -189,11 +231,11 @@ class RIRMorpha():
         
         title_ = None
         if isinstance(rir, int):
-            rir_key = self.rirs.attrs["IR-keys"][rir]
-            rir = self.rirs[rir_key][:]
+            rir_key = self.dataset.attrs["IR-keys"][rir]
+            rir = self.dataset[rir_key][:]
             title_ = rir_key
 
-        plot_data = self.__get_data_plot(rir=rir)
+        plot_data = self._get_data_plot(rir=rir)
         
         _ = plt.figure(figsize=(10, 5))
         gs = gridspec.GridSpec(2, 2, height_ratios=[1, 1])

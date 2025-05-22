@@ -58,7 +58,7 @@ def main() -> None:
     mark = 0
     curr_time = 0
     back = False
-    dstep = 5
+    dstep = 3
     while True:
         
         try:
@@ -76,12 +76,12 @@ def main() -> None:
             curr_ele = ((current_phi + 90) % 180)  - 90
             curr_azi = current_theta % 360
             
-            if current_rho >= 100:
+            if current_rho >= 30:
                 back = True
             if current_rho <= dstep:
                 back = False
             
-            if curr_time % 2 == 0:
+            if curr_time % 4 == 0:
                 if back:
                     current_rho -= dstep
                 else:
@@ -90,14 +90,13 @@ def main() -> None:
             pos = PolarPoint(rho=current_rho, phi=curr_ele, theta=curr_azi, opt=AngleMode.DEGREE) 
             AURALIZER.set_position(position=pos)
             
-            if curr_time % 2 == 0:
-                current_phi += 5
-                current_theta += 5
+            if curr_time % 1 == 0:
+                current_phi += 25
+                current_theta += 25
                 # print(curr_ele, curr_azi, curr_rho)
-            curr_time += 1
             
             # pass current hybrid space params
-            AURALIZER.set_morph_data(direction=0.5, morph_curve=CurveMode.LINEAR)
+            AURALIZER.set_morph_data(direction=0.37, morph_curve=CurveMode.LINEAR)
 
             # generates kernels (HRIR and RIR)
             kernels = AURALIZER.get_kernels()
@@ -109,9 +108,10 @@ def main() -> None:
                 # audio = np.concatenate((audio, convolved_frame), axis=0)
 
                 mark += CHUNK
+                curr_time += 1
             else:
                 stream.write(np.zeros((CHUNK, 2), dtype=np.float32).tobytes())
-            time.sleep(1 / SR)
+            # time.sleep(1 / SR)
         except KeyboardInterrupt:
             run = False
             AURALIZER.close()

@@ -5,7 +5,8 @@ import matplotlib.pyplot as plt
 from matplotlib import gridspec
 import scipy as sp
 from concurrent.futures import ThreadPoolExecutor
-from hybri_tools import AirData, ISO9613Filter, GeometricAttenuation, ETA, CoordMode, PolarPoint, InterpolationDomain, BuildMode, HBuilded, woodworth_itd3d
+from hybri_tools import AirData, ISO9613Filter, GeometricAttenuation, ETA, CoordMode, PolarPoint, InterpolationDomain, BuildMode, HBuilded, woodworth_itd3d, cross_fade, INTERNAL_KERNEL_TRANSITION, MAX_DISTANCE_TRANSITION
+# import time
 
 SPERICAL_THRESHOLD = 2 * 1e-6
 
@@ -89,7 +90,11 @@ class HRIRBuilder():
         self.__att_factor = None
         self.__p = None
         self.__air_conditions = None
-    
+        
+        self.__prev_coord_hash = None
+        self.__prev_dist_hrir = None
+        self.__prev_distance = None
+        
     def close(self) -> None:
         self.dataset.close_data()
         self.__att_factor = None
@@ -112,7 +117,7 @@ class HRIRBuilder():
         gain = -self.db_attenuation * (hrirs_info.target.rho - self.source_distance)
 
         min_arg = np.argmin(hrirs_info.distances)
-        if hrirs_info.distances[min_arg] < 1e-6:
+        if hrirs_info.distances[min_arg] < 1e-5:
             return HBuilded(hrir=hrirs_info.hrirs[min_arg], itd=hrirs_info.itds[min_arg], gain=gain)
         
         match method:
@@ -194,7 +199,9 @@ class HRIRBuilder():
                     case InterpolationDomain.TIME:
                         interpolated_time = a * h[0] + b * h[1]
                     case InterpolationDomain.FREQUENCY:
-                        interpolated_freq = a * h[0]["fft"] + b * h[1]["fft"]
+                        mag = a * h[0]["mag"] + b * h[1]["mag"]
+                        phase = a * np.unwrap(h[0]["angle"], axis=0) + b * np.unwrap(h[1]["angle"], axis=0)
+                        interpolated_freq = mag * np.exp(1j * phase)
         
         interpolated_itd = -interpolated_itd
         freqs = np.fft.rfftfreq(self.hrir_shape[0], d=1 / self.fs)
@@ -290,7 +297,7 @@ class HRIRBuilder():
             hinfo.coords[i] = self.dataset.get_cartesian_reference(index=min_index)
             hinfo.distances = distances
         # print("------")
-            
+
         return hinfo
     
     def build_hrir(self, hrirs_info: HInfo, method: BuildMode) -> HBuilded:
@@ -314,9 +321,20 @@ class HRIRBuilder():
             
         """
         
+        phash = self.__p._get_hash()
         interpolated = self.__interpolated_hrir(hrirs_info=hrirs_info, method=method, mode=self.interp_domain)
         dhrir = self.__distance_based_hrir(hrir=interpolated.hrir, rho=hrirs_info.target.rho) 
+        
+        if self.__prev_coord_hash is not None and phash != self.__prev_coord_hash:
+            d = abs(self.__p.rho - self.__prev_distance)
+            if d > MAX_DISTANCE_TRANSITION:
+                tlength = int(self.hrir_shape[0] / INTERNAL_KERNEL_TRANSITION)
+                dhrir = cross_fade(k1=self.__prev_dist_hrir, k2=dhrir, tlength=tlength)
+            
         interpolated.hrir = dhrir
+        self.__prev_coord_hash = self.__p._get_hash()
+        self.__prev_dist_hrir = interpolated.hrir
+        self.__prev_distance = self.__p.rho
         return interpolated
     
     def plot_hrir(self, data: NDArray[np.float64], title: str) -> None:

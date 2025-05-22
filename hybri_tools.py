@@ -14,6 +14,8 @@ MAX_DELAY_SEC = 1 # max delay per sample
 SLEW_RATE = 0.01 # smooth fractional delay
 P_REF = 101325.0
 T0 = 293.15
+INTERNAL_KERNEL_TRANSITION = 32
+MAX_DISTANCE_TRANSITION = 0.5 
 
 class CurveMode(Enum):
     LINEAR = 0
@@ -97,6 +99,15 @@ class PolarPoint():
     
     def _get_hash(self):
         return hashlib.md5(f"{self.rho}_{self.phi}_{self.theta}".encode()).hexdigest()
+
+class RData():
+    def __init__(self, rir1: int, rir2: int, smooth_factor: float, source1: NDArray[np.complex64], source2: NDArray[np.complex64], morphed: NDArray[np.complex64]) -> None:
+        self.rir1 = rir1
+        self.rir2 = rir2
+        self.smooth_factor = smooth_factor
+        self.source1 = source1
+        self.source2 = source2
+        self.morphed = morphed
 
 class AirData():
     def __init__(self, temperature: float, humidity: float, pressure: float = 101325.0):
@@ -234,4 +245,30 @@ def woodworth_itd3d(point: PolarPoint) -> float:
     svalue = point.rho * point.rho + HEAD_RADIUS * HEAD_RADIUS - 2 * HEAD_RADIUS * point.rho * sin_theta * cos_phi
     num = point.rho + HEAD_RADIUS * sin_theta * cos_phi - np.sqrt(svalue)
     return num / SOUND_SPEED
-    
+
+class RBuilded():
+    def __init__(self, rir: NDArray[np.float64], power_spectrum: NDArray[np.float64], freqs: NDArray[np.float64], integr: NDArray[np.float64]):
+        self.rir = rir
+        self.power_spectrum = power_spectrum
+        self.freqs = freqs
+        self.integr = integr
+
+@njit(cache=True)
+def cross_fade(k1: NDArray[np.float64], k2: NDArray[np.float64], tlength: int) -> NDArray[np.float64]:
+    kcross = k2.copy()
+    for i in range(tlength):
+        alpha_linear = float(i) / (tlength - 1.0)
+        alpha = alpha_linear * (np.pi / 2.0)
+        a = np.cos(alpha)
+        b = np.sin(alpha)
+        if k1.ndim > 1:
+            kcross[i, 0] = a * k1[i, 0] + b * k2[i, 0]
+            kcross[i, 1] = a * k1[i, 1] + b * k2[i, 1]
+        else:
+            kcross[i] = a * k1[i] + b * k2[i]
+    if tlength < k1.size:
+        if k1.ndim > 1:
+            kcross[tlength:, :] = k2[tlength:, :]
+        else:
+            kcross[tlength:] = k2[tlength:]
+    return kcross
