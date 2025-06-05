@@ -1,10 +1,9 @@
 import numpy as np
 from numpy.typing import NDArray
 import h5py
-import matplotlib.pyplot as plt
-from matplotlib import gridspec
 import hashlib
-from hybri_tools import ISO9613Filter, GeometricAttenuation, AirData, ETA, CurveMode, RData, cross_fade, INTERNAL_KERNEL_TRANSITION, MAX_DISTANCE_TRANSITION
+from hybri_tools import ISO9613Filter, GeometricAttenuation, AirData, ETA, CurveMode, RData, cross_fade, LRUCache
+from hybri_tools import INTERNAL_KERNEL_TRANSITION, MAX_DISTANCE_TRANSITION, LRU_CAPACITY
 from numba import njit
 
 class PlotData():
@@ -49,7 +48,7 @@ class RIRMorpha():
         
         self.geometric_attenuation = GeometricAttenuation(fs=self.fs, channels=1)
         
-        self.__cache_rir_builded = {}
+        self.__cache_rir_builded = LRUCache[RData](capacity=LRU_CAPACITY)
         self.__current_key = None
 
         self.source1 = None
@@ -60,7 +59,7 @@ class RIRMorpha():
         self.__prev_dist = None
 
     def close(self) -> None:
-        self.dataset.close()
+        self.dataset.close()       
     
     def set_air_conditions(self, air_data: AirData) -> None:
         self.iso9613 = ISO9613Filter(air_data=air_data, fs=self.fs)
@@ -82,7 +81,7 @@ class RIRMorpha():
         
         self.__current_key = hashlib.md5(f"{rir1}_{rir2}_{smooth_factor}".encode()).hexdigest()
         
-        if self.__current_key not in self.__cache_rir_builded:
+        if self.__cache_rir_builded.get(key=self.__current_key) is None:
             k1 = self.dataset.attrs["IR-keys"][rir1]
             k2 = self.dataset.attrs["IR-keys"][rir2]
             source1 = self.dataset[k1][:]
@@ -109,9 +108,10 @@ class RIRMorpha():
             self.cache_data["r1"] = rir1
             self.cache_data["r2"] = rir2
             self.cache_data["sf"] = smooth_factor
-            self.__cache_rir_builded[self.__current_key] = RData(rir1=rir1, rir2=rir2, smooth_factor=smooth_factor, source1=source1f, source2=source2f, morphed=morphed)
+            rdata = RData(rir1=rir1, rir2=rir2, smooth_factor=smooth_factor, source1=source1f, source2=source2f, morphed=morphed)
+            self.__cache_rir_builded.put(key=self.__current_key, value=rdata)
         else:
-            rdata = self.__cache_rir_builded[self.__current_key]
+            rdata = self.__cache_rir_builded.get(key=self.__current_key)
             self.source1 = rdata.source1
             self.source2 = rdata.source2
             self.morphed = rdata.morphed
@@ -194,7 +194,7 @@ class RIRMorpha():
         if self.__prev_dist is not None:
             d = abs(distance - self.__prev_dist)
             if d > MAX_DISTANCE_TRANSITION:
-                tlength = int(y_dist.size / INTERNAL_KERNEL_TRANSITION)
+                tlength = int(INTERNAL_KERNEL_TRANSITION * self.fs)
                 y = cross_fade(k1=self.__prev_dist_rir, k2=y_dist, tlength=tlength)
             else:
                 y = y_dist
@@ -205,7 +205,6 @@ class RIRMorpha():
         self.__prev_dist_rir = y_dist
         return y
         
-    
     def _get_data_plot(self, rir: NDArray[np.float32]) -> PlotData:
         n = len(rir)
         e = np.cumsum(rir[::-1] ** 2)[::-1]
@@ -215,56 +214,3 @@ class RIRMorpha():
         t = np.arange(n) / self.fs
         freqs = np.fft.rfftfreq(len(t), d=1 / self.fs)
         return PlotData(t=t, f=freqs, mag=mag, integr=db)
-    
-    def plot_rir(self, rir: int|NDArray[np.float32], title: str|None = None) -> None:
-        """
-        PLOT RIR
-
-        Parameters
-        ----------
-        rir : int | NDArray[np.float32]
-            rir index or rir data array
-        
-        title : str | None
-            plot title, by default None
-        """
-        
-        title_ = None
-        if isinstance(rir, int):
-            rir_key = self.dataset.attrs["IR-keys"][rir]
-            rir = self.dataset[rir_key][:]
-            title_ = rir_key
-
-        plot_data = self._get_data_plot(rir=rir)
-        
-        _ = plt.figure(figsize=(10, 5))
-        gs = gridspec.GridSpec(2, 2, height_ratios=[1, 1])
-        
-        if title is None:
-            if title_ is None:
-                title_ = "No Title"
-        else:
-            title_ = title
-        
-        plt.suptitle(f"RIR: {title_}")
-        
-        ax0 = plt.subplot(gs[0, :])
-        ax1 = plt.subplot(gs[1, 0])
-        ax2 = plt.subplot(gs[1, 1])
-        
-        ax0.plot(plot_data.t, rir, c="k", lw=0.7)
-        ax0.set_xlabel("Time")
-        ax0.set_ylabel("Amplitude")
-    
-        ax1.plot(plot_data.f, plot_data.mag, c="k", lw=0.7)
-        ax1.set_xlabel("Freqs")
-        ax1.set_ylabel("Mag")
-        ax1.set_title("Power Spectrum")
-        
-        ax2.plot(plot_data.t, plot_data.integr, c="k", lw=0.7)
-        ax2.set_xlabel("Time")
-        ax2.set_ylabel("dB")
-        ax2.set_title("Inverse Integration (Energy Decay Curve)")
-        
-        plt.tight_layout()
-        plt.show()

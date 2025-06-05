@@ -14,8 +14,9 @@ MAX_DELAY_SEC = 1 # max delay per sample
 SLEW_RATE = 0.01 # smooth fractional delay
 P_REF = 101325.0
 T0 = 293.15
-INTERNAL_KERNEL_TRANSITION = 32
-MAX_DISTANCE_TRANSITION = 0.5 
+INTERNAL_KERNEL_TRANSITION = 0.003 # in sec.
+MAX_DISTANCE_TRANSITION = 0.5
+LRU_CAPACITY = 4096
 
 class CurveMode(Enum):
     LINEAR = 0
@@ -119,7 +120,7 @@ class AirData():
         temperature : float
             tempertature in celsius
         humidity : float
-            humidity in percent from 0 to 1 where 1 = 100%
+            humidity in percent from 0 to 100 %
         pressure : float
             atmospheric pressure in Pa, default = 101325
         """
@@ -157,7 +158,7 @@ class ISO9613Filter():
         f_rN = self.air_data.pressure * tr_neg * (9.0 + 280.0 * h * np.exp(-4.17 * (tr ** (-1 / 3.0) - 1.0)))
         
         # Calcolo del coefficiente di assorbimento in dB/m
-        freq_squared = self.frequencies  ** 2
+        freq_squared = self.frequencies ** 2
         
         # Termine per l'assorbimento classico (viscosità e conduzione termica)
         alpha_classical = (
@@ -207,7 +208,7 @@ class ISO9613Filter():
         return filtered
 
     def air_absorption_filter(self, frame: NDArray[np.float64], alpha_absortion: NDArray[np.float64], distance: float) -> NDArray[np.float64]:
-        relative_distance = distance if distance > 0 else 0
+        relative_distance = max(0.0, distance)
         db_attenuation = alpha_absortion * relative_distance
         gain = 10 ** (-db_attenuation / 20)
         gain[-1] = 0.0
@@ -254,6 +255,17 @@ class RBuilded():
         self.integr = integr
 
 @njit(cache=True)
+def intermediate_segment(x: NDArray[np.float64], k1: NDArray[np.float64], k2: NDArray[np.float64], ksize: int, tlength: int) -> NDArray[np.float64]:
+    segment = np.zeros(x.size + ksize - 1, dtype=np.float64)
+    for i in range(tlength):
+        alpha = float(i) / (tlength - 1.0)
+        crossed = (1.0 - alpha) * k1 + alpha * k2
+        current_x_sample = x[i]
+        for k_idx in range(ksize):
+            segment[i + k_idx] += current_x_sample * crossed[k_idx]
+    return segment
+
+@njit(cache=True)
 def cross_fade(k1: NDArray[np.float64], k2: NDArray[np.float64], tlength: int) -> NDArray[np.float64]:
     kcross = k2.copy()
     for i in range(tlength):
@@ -272,3 +284,56 @@ def cross_fade(k1: NDArray[np.float64], k2: NDArray[np.float64], tlength: int) -
         else:
             kcross[tlength:] = k2[tlength:]
     return kcross
+
+class Node[T]():
+    def __init__(self, key: str, value: T) -> None:
+        self.key = key
+        self.value = value
+        self.prev_node = None
+        self.next_node = None
+
+class LRUCache[T]():
+    def __init__(self, capacity: int) -> None:
+        self.capacity = capacity
+        self.cache = {}
+        self.head = Node(key="HEAD", value=None)
+        self.tail = Node(key="TAIL", value=None)
+        self.head.next_node = self.tail
+        self.tail.prev_node = self.head
+    
+    def __remove(self, node: Node) -> None:
+        prev = node.prev_node
+        nxt = node.next_node
+        prev.next_node = nxt
+        nxt.prev_node = prev
+    
+    def __add(self, node: Node) -> None:
+        node.next_node = self.head.next_node
+        node.prev_node = self.head
+        self.head.next_node.prev_node = node
+        self.head.next_node = node
+    
+    def __move_to_head(self, node: Node) -> None:
+        self.__remove(node=node)
+        self.__add(node=node)
+    
+    def put(self, key: str, value: T) -> None:
+        if key in self.cache:
+            self.__move_to_head(node=self.cache[key])
+        else:
+            node = Node(key=key, value=value)
+            self.cache[key] = node
+            self.__add(node=node)
+        
+        if len(self.cache) > self.capacity:
+            lru = self.tail.prev_node
+            self.__remove(node=lru)
+            del self.cache[lru.key]
+        
+    def get(self, key: str) -> T|None:
+        if key in self.cache:
+            node = self.cache[key]
+            self.__move_to_head(node=node)
+            return node.value
+        else:
+            return None

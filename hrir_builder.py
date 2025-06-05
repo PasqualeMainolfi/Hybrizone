@@ -1,14 +1,12 @@
 import numpy as np
 from numpy.typing import NDArray
 import h5py
-import matplotlib.pyplot as plt
-from matplotlib import gridspec
 import scipy as sp
 from concurrent.futures import ThreadPoolExecutor
-from hybri_tools import AirData, ISO9613Filter, GeometricAttenuation, ETA, CoordMode, PolarPoint, InterpolationDomain, BuildMode, HBuilded, woodworth_itd3d, cross_fade, INTERNAL_KERNEL_TRANSITION, MAX_DISTANCE_TRANSITION
+from hybri_tools import AirData, ISO9613Filter, GeometricAttenuation, ETA, CoordMode, PolarPoint, InterpolationDomain, LRUCache
+from hybri_tools import BuildMode, HBuilded, woodworth_itd3d, cross_fade, INTERNAL_KERNEL_TRANSITION, MAX_DISTANCE_TRANSITION, LRU_CAPACITY
 # import time
 
-SPERICAL_THRESHOLD = 2 * 1e-6
 
 class HrirHDFData():
     def __init__(self, dataset_path: str, coord_mode: CoordMode):
@@ -55,14 +53,15 @@ class HrirHDFData():
 class HInfo():
     def __init__(
         self, 
-        hrirs: NDArray[np.float32], 
-        hrtfs: NDArray[np.complex64], 
-        itds: NDArray[np.float32], 
-        coords: NDArray[np.int16],
-        distances: NDArray[np.float64], 
-        target: PolarPoint, 
-        shape: NDArray[np.float32], 
-        n_neighs: int
+        hrirs: NDArray[np.float32]|None = None, 
+        hrtfs: NDArray[np.complex64]|None = None, 
+        itds: NDArray[np.float32]|None = None, 
+        coords: NDArray[np.float64]|None = None,
+        distances: NDArray[np.float64]|None = None, 
+        target: PolarPoint|None = None, 
+        shape: NDArray[np.float32]|None = None, 
+        n_neighs: int = 0,
+        point_hash: str|None = None
     ) -> None:
         
         self.hrirs = hrirs
@@ -73,6 +72,7 @@ class HInfo():
         self.target = target
         self.shape = shape
         self.n_neighs = n_neighs
+        self.point_hash = point_hash
 
 class HRIRBuilder():
     
@@ -87,22 +87,15 @@ class HRIRBuilder():
         self.iso9613 = None
         self.db_attenuation = None
         
-        self.__att_factor = None
-        self.__p = None
-        self.__air_conditions = None
-        
-        self.__prev_coord_hash = None
         self.__prev_dist_hrir = None
         self.__prev_distance = None
         
+        self.__cache_hrir_builded = LRUCache[HBuilded](capacity=LRU_CAPACITY)
+        
     def close(self) -> None:
         self.dataset.close_data()
-        self.__att_factor = None
-        self.__p = None
-        self.__air_conditions = None
     
     def set_air_conditions(self, air_data: AirData) -> None:
-        self.__air_conditions = air_data
         self.iso9613 = ISO9613Filter(air_data=air_data, fs=self.fs)
         self.db_attenuation = self.iso9613.get_attenuation_air_absorption()
     
@@ -114,7 +107,9 @@ class HRIRBuilder():
         interpolated_itd = None
         
         check_itd_distance = True if hrirs_info.target.rho < self.dataset.get_source_distance() else False
-        gain = -self.db_attenuation * (hrirs_info.target.rho - self.source_distance)
+        gfac = hrirs_info.target.rho - self.source_distance
+        gfac = gfac if gfac > 0 else 0
+        gain = -self.db_attenuation * gfac
 
         min_arg = np.argmin(hrirs_info.distances)
         if hrirs_info.distances[min_arg] < 1e-5:
@@ -233,10 +228,8 @@ class HRIRBuilder():
         
         return HBuilded(hrir=result, itd=interpolated_itd, gain=gain)
     
-        
     def __distance_based_hrir(self, hrir: NDArray[np.float64], rho: float) -> NDArray[np.float64]:
         factor = self.geometric_attenuation.calculate_geometric_attenuation(source_distance=self.source_distance, distance=rho)
-        self.__att_factor = factor
         
         if factor < 1.0:
             with ThreadPoolExecutor(max_workers=2) as delayer:
@@ -269,7 +262,11 @@ class HRIRBuilder():
         neighs = neighs if neighs >= 2 else 2
         
         point.rho = max(point.rho, ETA)
-        self.__p = point
+        point_hash = point._get_hash()
+        
+        if self.__cache_hrir_builded.get(key=point_hash) is not None:
+            return HInfo(point_hash=point_hash)
+            
         cart = point.get_cartesian(mode=self.mode)
         distances, indices = self.dataset.neighs_finder.query([cart.x, cart.y, cart.z], k=neighs)
         
@@ -297,7 +294,7 @@ class HRIRBuilder():
             hinfo.coords[i] = self.dataset.get_cartesian_reference(index=min_index)
             hinfo.distances = distances
         # print("------")
-
+        
         return hinfo
     
     def build_hrir(self, hrirs_info: HInfo, method: BuildMode) -> HBuilded:
@@ -321,78 +318,25 @@ class HRIRBuilder():
             
         """
         
-        phash = self.__p._get_hash()
-        interpolated = self.__interpolated_hrir(hrirs_info=hrirs_info, method=method, mode=self.interp_domain)
-        dhrir = self.__distance_based_hrir(hrir=interpolated.hrir, rho=hrirs_info.target.rho) 
+        if hrirs_info.point_hash is not None:
+            return self.__cache_hrir_builded.get(key=hrirs_info.point_hash)
         
-        if self.__prev_coord_hash is not None and phash != self.__prev_coord_hash:
-            d = abs(self.__p.rho - self.__prev_distance)
+        interpolated = self.__interpolated_hrir(hrirs_info=hrirs_info, method=method, mode=self.interp_domain)
+        dhrir_ = self.__distance_based_hrir(hrir=interpolated.hrir, rho=hrirs_info.target.rho) 
+        
+        if self.__prev_distance is not None and self.__prev_distance != hrirs_info.target.rho:
+            d = abs(hrirs_info.target.rho - self.__prev_distance)
             if d > MAX_DISTANCE_TRANSITION:
-                tlength = int(self.hrir_shape[0] / INTERNAL_KERNEL_TRANSITION)
-                dhrir = cross_fade(k1=self.__prev_dist_hrir, k2=dhrir, tlength=tlength)
+                tlength = int(INTERNAL_KERNEL_TRANSITION * self.fs)
+                dhrir = cross_fade(k1=self.__prev_dist_hrir, k2=dhrir_, tlength=tlength)
+            else:
+                dhrir = dhrir_
+        else:
+            dhrir = dhrir_
             
         interpolated.hrir = dhrir
-        self.__prev_coord_hash = self.__p._get_hash()
-        self.__prev_dist_hrir = interpolated.hrir
-        self.__prev_distance = self.__p.rho
+        self.__prev_dist_hrir = dhrir_
+        self.__prev_distance = hrirs_info.target.rho
+        point_hash = hrirs_info.target._get_hash()
+        self.__cache_hrir_builded.put(key=point_hash, value=interpolated)
         return interpolated
-    
-    def plot_hrir(self, data: NDArray[np.float64], title: str) -> None:
-        sr = self.fs
-        f = np.fft.rfftfreq(data.shape[0], d = 1 / sr)
-        ps = np.abs(np.fft.rfft(data, axis=0))
-        t = np.arange(data.shape[0]) / sr
-        
-        rho = np.round(self.__p.rho, decimals=3)
-        phi = np.round(self.__p.phi, decimals=3)
-        theta = np.round(self.__p.theta, decimals=3)
-        
-        d = rho - max(self.source_distance, ETA)
-        d = d if d > 0 else 0
-        db_attenuation = -self.db_attenuation * d
-
-        _ = plt.figure(figsize=(12, 9))
-        # fig.subplots_adjust(hspace=10)
-        gs = gridspec.GridSpec(6, 2, height_ratios=[1, 1, 1, 1, 1, 1])
-        ax0 = plt.subplot(gs[:2, 0])
-        ax1 = plt.subplot(gs[2:4, 0])
-        ax2 = plt.subplot(gs[4:, 0])
-        ax3 = plt.subplot(gs[:3, 1])
-        ax4 = plt.subplot(gs[3:, 1])
-        
-        temp = self.__air_conditions.kelvin - 273.15
-        hum = self.__air_conditions.humidity * 100
-        pres = self.__air_conditions.pressure * 101325.0
-        phi = ((np.rad2deg(phi) + 90) % 180) - 90
-        phi = np.round(phi, decimals=3)
-        theta = np.round(np.rad2deg(theta) % 360, decimals=3)
-        
-        plt.suptitle(f'{title}' "\n" f'T = {temp} ' r'$\mathrm{^{\circ} C}$' f', RH = {hum} %' f', P = {pres}' r' $\mathrm{Pa}$' "\n" r'$(\varrho, \varphi, \vartheta)$' f' = {rho, phi, theta}, ' r'$\varrho_0$' f' = {self.source_distance}' r' $\mathrm{m}$, $\varrho$' f' = {rho}' r' $\mathrm{m}$, $\gamma(\varrho)$' f' = {np.round(self.__att_factor, decimals=3)}, ' r'$y = {GAMMA}$, ' r'$\varrho_{min} = $' f'{np.round(ETA, decimals=3)}' r' $\mathrm{m}$')
-        
-        ax0.plot(f, ps[:, 0], c="k", lw=0.5)
-        ax0.set_title("LEFT CH. POWER SPECTRUM")
-        ax0.set_xlabel("Freq.")
-        ax0.set_ylabel("Mag.")
-        ax1.plot(f, ps[:, 1], c="k", lw=0.5)
-        ax1.set_title("RIGHT CH. POWER SPECTRUM")
-        ax1.set_xlabel("Freq.")
-        ax1.set_ylabel("Mag.")
-       
-        ax2.plot(self.iso9613.frequencies, db_attenuation, c="k", lw=0.5)
-        ax2.set_title("IMPOSED ISO 9613-1 (GAIN)")
-        ax2.set_xlabel("Freq.")
-        ax2.set_ylabel("dB")
-        
-        ax3.plot(t, data[:, 0], c="k", lw=0.7)
-        ax3.set_title("LEFT CH. WAVEFORM")
-        ax3.set_xlabel("Time")
-        ax3.set_ylabel("Amp.")
-        ax4.plot(t, data[:, 1], c="k", lw=0.7)
-        ax4.set_title("RIGHT CH. WAVEFORM")
-        ax4.set_xlabel("Time")
-        ax4.set_ylabel("Amp.")
-        
-        plt.tight_layout()
-        plt.subplots_adjust(top=0.85)
-        plt.show()
-    

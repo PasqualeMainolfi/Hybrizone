@@ -14,7 +14,7 @@ HRIR_PATH = "/Users/pm/AcaHub/Coding/BinauralSpatial/data/HRIR-KEMAR_DATASET.h5"
 RIR_PATH = "/Users/pm/AcaHub/Coding/BinauralSpatial/data/RIR-MIT_SURVEY.h5"
 AUDIO_PATH = "/Users/pm/AcaHub/AudioSamples/suzanne_mono.wav"
 
-CHUNK = 4096
+CHUNK = 1024
 SR = 44100
 CHANNELS = 2
 

@@ -1,0 +1,8 @@
+ -std=c++2b
+ -lhdf5
+ -lhdf5_cpp
+ -lfftw3
+ -I/opt/homebrew/opt/hdf5/include
+ -L/opt/homebrew/opt/hdf5/lib
+ -I/opt/homebrew/opt/fftw/include
+ -L/opt/homebrew/opt/fftw/lib

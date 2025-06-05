@@ -1,7 +1,6 @@
 import scipy.signal
-import scipy.special
 import hrir_builder as hrb
-from hybri_tools import CoordMode, PolarPoint, BuildMode, InterpolationDomain, AirData, CurveMode, HBuilded, RBuilded 
+from hybri_tools import CoordMode, PolarPoint, BuildMode, InterpolationDomain, AirData, CurveMode, HBuilded, RBuilded, intermediate_segment
 from hybri_tools import AngleMode # noqa
 from hrir_builder import HInfo
 import rir_builder as rib
@@ -10,22 +9,10 @@ from numpy.typing import NDArray
 import scipy
 from concurrent.futures import ThreadPoolExecutor
 import time
-from numba import njit
 
 TRANSITION_FACTOR = 0.5
 MAX_TRANSITION_SAMPLES = 512
 SOFT_CLIP_SCALE = 1.0 / 0.707
-
-@njit(cache=True)
-def intermediate_segment(x: NDArray[np.float64], k1: NDArray[np.float64], k2: NDArray[np.float64], ksize: int, tlength: int) -> NDArray[np.float64]:
-    segment = np.zeros(x.size + ksize - 1, dtype=np.float64)
-    for i in range(tlength):
-        alpha = float(i) / (tlength - 1.0)
-        crossed = (1.0 - alpha) * k1 + alpha * k2
-        current_x_sample = x[i]
-        for k_idx in range(ksize):
-            segment[i + k_idx] += current_x_sample * crossed[k_idx]
-    return segment
 
 class SmoothedConvolution():
     
@@ -138,8 +125,6 @@ class Hybrizone():
         self.__temp_rho = None
         self.__temp_rir = None
         
-        self.__cache_hrir = {}
-        
         self.__htime = 0.0
         self.__rtime = 0.0
         self.__ptime = 0.0
@@ -200,19 +185,13 @@ class Hybrizone():
         return np.tanh(convolved * SOFT_CLIP_SCALE)
 
     def set_position(self, position: PolarPoint) -> None:
-        pkey = position._get_hash()
-
-        if pkey in self.__cache_hrir:
-            self.__temp_hrir = self.__cache_hrir[pkey]
-        else:
-            tstart = time.perf_counter()
-            hrirs = self.query_hrirs(spatial_position=position, n_neighs=self.__params.interpolation_neighs)
-            temp_hrir = self.build_distance_based_hrir(hrirs=hrirs)
-            tend = time.perf_counter()
-            self.__htime += tend - tstart            
-            self.__cache_hrir[pkey] = temp_hrir
-            self.__temp_hrir = temp_hrir
-
+        tstart = time.perf_counter()
+        hrirs = self.query_hrirs(spatial_position=position, n_neighs=self.__params.interpolation_neighs)
+        temp_hrir = self.build_distance_based_hrir(hrirs=hrirs)
+        tend = time.perf_counter()
+        self.__htime += tend - tstart
+        
+        self.__temp_hrir = temp_hrir
         self.__temp_rho = position.rho
     
     def set_morph_data(self, direction: float, morph_curve: CurveMode) -> None:
@@ -284,20 +263,6 @@ class Hybrizone():
         """
 
         return self.hrir_builder.build_hrir(hrirs_info=hrirs, method=self.__params.build_mode)
-
-    def display_hrir(self, hrir: NDArray[np.float64], title: str) -> None:
-        """
-        PLOT HRIR ANALYSIS
-
-        Parameters
-        ----------
-        hrir : NDArray[np.float64]
-            hrir
-        title : str
-            plot title
-        """
-
-        self.hrir_builder.plot_hrir(data=hrir, title=title)
 
     # --- END HRIR SECTION ---
 
@@ -393,20 +358,6 @@ class Hybrizone():
         """
 
         return self.rir_builder.morpha(direction=direction, morph_curve=morph_curve, distance=rho)
-
-    def display_rir(self, rir: int|NDArray[np.float64], title: str|None = None) -> None:
-        """
-        _summary_
-
-        Parameters
-        ----------
-        rir : int | NDArray[np.float64]
-            RIR defined starting from database index or data array
-        title : str | None, optional
-            plot title. If rir=int plot title will be the RIR key, by default None
-        """
-
-        self.rir_builder.plot_rir(rir=rir, title=title)
 
     def get_rir(self, key: str) -> NDArray[np.float64]:
         return self.rir_builder.dataset[key][:]
