@@ -1,4 +1,5 @@
 #include "htools.hpp"
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <limits>
@@ -6,24 +7,31 @@
 void lerp(double* x, double* y, double* xnew, double* yout, size_t xsize, size_t xnew_size, bool fill_value) {
     for (size_t i = 0; i < xnew_size; ++i) {
         double value = xnew[i];
-        if (value <= x[0]) {
+
+        if (value < x[0]) {
             yout[i] = fill_value ? 0.0 : y[0];
-        } else if (value >= x[xnew_size - 1]) {
-            yout[i] = fill_value ? 0.0 : y[xnew_size - 1];
+            continue;
+        }
+
+        if (value > x[xsize - 1]) {
+            yout[i] = fill_value ? 0.0 : y[xsize - 1];
+            continue;
+        }
+
+        auto it = std::lower_bound(x, x + xsize, value);
+        size_t idx = it - x;
+
+        if (x[idx] == value || idx == 0) {
+            yout[i] = y[idx];
         } else {
-            for (size_t j = 0; j < xsize - 1; ++j) {
-                if (value < x[j + 1] && value >= x[j]) { // change with binary search
-                    double x0, x1, y0, y1;
-                    x0 = x[j];
-                    x1 = x[j + 1];
-                    y0 = y[j];
-                    y1 = y[j + 1];
-                    double t = (value - x0) / (x1 - x0);
-                    double yvalue = y0 + t * (y1 - y0);
-                    yout[i] = yvalue;
-                    break;
-                }
-            }
+            double x0 = x[idx - 1];
+            double x1 = x[idx];
+            double y0 = y[idx -1];
+            double y1 = y[idx];
+
+            double t = (value - x0) / (x1 - x0);
+            yout[i] = y0 + (y1 - y0) * t;
+            // std::cout << yout[i] << std::endl;
         }
     }
 }

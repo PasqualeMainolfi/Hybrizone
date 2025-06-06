@@ -1,4 +1,4 @@
-FLAG = -Wextra -Wall -O3
+FLAG = -Wextra -Wall -O3 -fopenmp
 LIBS = -lhdf5 -lhdf5_cpp -lfftw3
 INCLUDE = -I/opt/homebrew/opt/hdf5/include -I/opt/homebrew/opt/fftw/include
 LIBRARY = -L/opt/homebrew/opt/hdf5/lib -L/opt/homebrew/opt/fftw/lib

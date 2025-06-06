@@ -182,8 +182,8 @@ class HRIRBuilder():
                     sin_omega = np.sin(omega)
 
                     alpha = omega1 / (omega1 + omega2)
-                    a = (np.sin((1 - alpha) * omega) / sin_omega) 
-                    b = (np.sin(alpha * omega) / sin_omega)
+                    a = np.sin((1 - alpha) * omega) / sin_omega
+                    b = np.sin(alpha * omega) / sin_omega
                 
                 if check_itd_distance:
                     interpolated_itd = woodworth_itd3d(point=hrirs_info.target)

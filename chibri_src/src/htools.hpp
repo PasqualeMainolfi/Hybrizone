@@ -7,8 +7,11 @@
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
+#include <format>
 #include <iostream>
 #include <fftw3.h>
+#include <string>
+#include <unordered_map>
 
 #define P_REF (101325.0)
 #define T0 (293.15)
@@ -23,6 +26,7 @@
 #define MAX_CROSSFADE_DISTANCE (0.5)
 #define INTERNAL_KERNEL_TRANSITION  (0.003)
 #define CHANNELS (2)
+#define CACHE_CAPACITY (4096)
 
 inline double deg2rad(double deg_value) {
     return deg_value * M_PI / 180.0;
@@ -33,25 +37,26 @@ inline double rad2deg(double rad_value) {
 }
 
 inline void unwrap_phase(double* x, size_t length) {
-    double* buffer = (double*) malloc(sizeof(double) * 2 * length);
-    buffer[0] = x[0];
-    buffer[1] = x[1];
-    double left_correction = 0.0;
-    double right_correction = 0.0;
+    double prev_left = x[0];
+    double prev_right = x[1];
+
     for (size_t i = 1; i < length; ++i) {
-        size_t left_index_prev = (i - 1) * 2;
-        size_t left_index_curr = i * 2;
-        double left_diff = x[left_index_curr] - x[left_index_prev];
-        double right_diff = x[left_index_curr + 1] - x[left_index_prev + 1];
-        double left_jump = std::abs(left_diff) <= M_PI ? 0.0 : std::round(left_diff / TWOPI);
-        double right_jump = std::abs(right_diff) <= M_PI ? 0.0 : std::round(right_diff / TWOPI);
-        left_correction -= left_jump * TWOPI;
-        right_correction -= right_jump * TWOPI;
-        buffer[left_index_curr] = x[left_index_curr] + left_correction;
-        buffer[left_index_curr + 1] = x[left_index_curr + 1] + right_correction;
+        size_t li = i * 2;
+        size_t ri = li + 1;
+
+        double delta_left = x[li] - prev_left;
+        double delta_right = x[ri] - prev_right;
+
+        // Riporta delta nell'intervallo [-π, π]
+        if (delta_left > M_PI) x[li] -= TWOPI;
+        else if (delta_left < -M_PI) x[li] += TWOPI;
+
+        if (delta_right > M_PI) x[ri] -= TWOPI;
+        else if (delta_right < -M_PI) x[ri] += TWOPI;
+
+        prev_left = x[li];
+        prev_right = x[ri];
     }
-    memcpy(x, buffer, sizeof(double) * 2 * length);
-    free(buffer);
 }
 
 enum HDataType
@@ -99,16 +104,11 @@ public:
     }
 
     CartesianPoint normalize() {
-        double norm = sqrt(this->x * this->x + this->y * this->y + this->z * this->z);
-
-        CartesianPoint pn(0.0, 0.0, 0.0);
-        if (norm > 0.0) {
-            pn.x = this->x / norm;
-            pn.y = this->y / norm;
-            pn.z = this->z / norm;
+        double norm = std::hypot(this->x, this->y, this->z);
+        if (norm > 1e-10) {
+            return CartesianPoint(this->x / norm, this->y / norm, this->z / norm);
         }
-
-        return pn;
+        return CartesianPoint(0.0, 0.0, 0.0);
     }
 };
 
@@ -155,7 +155,37 @@ public:
         return CartesianPoint(x, y, z);
     }
 
+    std::string get_polar_key() {
+        return std::format("{:.5f}:{:.5f}:{:.5f}", this->rho, this->phi, this->theta);
+    }
+
 };
+
+struct Hrir
+{
+    double* left_channel;
+    double* right_channel;
+    size_t channel_length;
+
+    Hrir()
+    : left_channel(nullptr), right_channel(nullptr), channel_length(0)
+    { }
+
+    Hrir(double* left, double* right, size_t buffer_size)
+    : channel_length(buffer_size)
+    {
+        this->left_channel = (double*) malloc(sizeof(double) * this->channel_length);
+        this->right_channel = (double*) malloc(sizeof(double) * this->channel_length);
+        memcpy(this->left_channel, left, sizeof(double) * this->channel_length);
+        memcpy(this->right_channel, right, sizeof(double) * this->channel_length);
+    }
+
+    ~Hrir() {
+        if (this->left_channel) free(this->left_channel);
+        if (this->right_channel) free(this->right_channel);
+    }
+};
+
 
 class HrirDatasetRead
 {
@@ -169,7 +199,6 @@ class HrirDatasetRead
     double source_distance;
     double sample_rate;
     size_t dataset_size;
-
 
 public:
     HrirDatasetRead() = default;
@@ -305,7 +334,6 @@ void lerp(double* x, double* y, double* xnew, double* yout, size_t xsize, size_t
 // itd calculation
 double woodworth_itd3d(const PolarPoint& p);
 
-
 class ISO9613Filter
 {
 public:
@@ -325,17 +353,12 @@ public:
             this->fnorm[i] = value / (this->sample_rate / 2.0);
         }
 
-        this->fresp = nullptr;
-        this->ftemp = nullptr;
-        this->fftout = nullptr;
     }
 
     ~ISO9613Filter() {
         free(this->frequencies);
         free(this->fnorm);
-        free(this->fresp);
-        free(this->ftemp);
-        fftw_free(this->fftout);
+        // free(this->fresp);
     }
 
     void get_attenuation_air_absorption(double* alpha) {
@@ -368,6 +391,7 @@ public:
 
     void air_absorption_filter(double* frame, double* alpha, double distance, size_t frame_size) {
         double rdist = std::max(0.0, distance);
+
         for (size_t i = 0; i < NFREQS; ++i) {
             double db_attenuation = alpha[i] * rdist;
             alpha[i] = pow(10.0, -db_attenuation / 20.0);
@@ -380,57 +404,44 @@ private:
     double sample_rate;
     double* frequencies;
     double* fnorm;
-    double* fresp;
-    double* ftemp;
-    fftw_complex* fftout;
 
     // multiband filter (apply on a single channel Left and Right)
     void multiband_fft_filter(double* frame, double* alpha, size_t frame_size) {
-        size_t half_size = static_cast<size_t>(frame_size / 2 + 1);
-        double step = 1.0 / half_size;
+        size_t half_size = frame_size / 2 + 1;
+        double step = 1.0 / static_cast<double>(half_size - 1);
 
-        double* temp = (double*) realloc(this->ftemp, sizeof(double) * half_size);
-
-        if (!temp) {
-            std::cerr << "[ERROR] Failed realloc in multiband filter" << std::endl;
-            return;
-        }
-
-        this->ftemp = temp;
+        double* ftemp = (double*) malloc(sizeof(double) * half_size);
         for (size_t i = 0; i < half_size; ++i) {
-            this->ftemp[i] = step * (double) i;
+            ftemp[i] = step * (double) i;
         }
 
-        double* resp = (double*) realloc(this->fresp, sizeof(double) * half_size);
+        double* fresp = (double*) malloc(sizeof(double) * half_size);
+        lerp(this->fnorm, alpha, ftemp, fresp, NFREQS, half_size, false);
+        free(ftemp);
 
-        if (!resp) {
-            std::cerr << "[ERROR] Failed realloc in multiband filter" << std::endl;
-            return;
-        }
-
-        this->fresp = resp;
-        lerp(frame, alpha, this->ftemp, this->fresp, frame_size, half_size, false);
-
-        fftw_complex* temp_fft = (fftw_complex*) realloc(this->fftout, sizeof(fftw_complex) * half_size);
-        this->fftout = temp_fft;
-        fftw_plan fft_plan = fftw_plan_dft_r2c_1d(frame_size, frame, this->fftout, FFTW_MEASURE);
+        fftw_complex* temp_fft = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * half_size);
+        fftw_plan fft_plan = fftw_plan_dft_r2c_1d(frame_size, frame, temp_fft, FFTW_MEASURE);
         fftw_execute(fft_plan);
         fftw_destroy_plan(fft_plan);
+
         for (size_t i = 0; i < half_size; ++i) {
-            double att = this->fresp[i];
-            this->fftout[i][0] = this->fftout[i][0] * att;
-            this->fftout[i][1] = this->fftout[i][1] * att;
+            double att = fresp[i];
+            temp_fft[i][0] *= att;
+            temp_fft[i][1] *= att;
         }
 
-        memset(frame, 0, sizeof(double) * frame_size);
-        fftw_plan ifft_plan = fftw_plan_dft_c2r_1d(frame_size, this->fftout, frame, FFTW_MEASURE);
-        for (size_t i = 0; i < frame_size; ++i) {
-            frame[i] /= static_cast<double>(frame_size);
-        }
+        fftw_plan ifft_plan = fftw_plan_dft_c2r_1d(frame_size, temp_fft, frame, FFTW_ESTIMATE);
 
         fftw_execute(ifft_plan);
         fftw_destroy_plan(ifft_plan);
 
+        for (size_t i = 0; i < frame_size; ++i) {
+            frame[i] /= static_cast<double>(frame_size);
+            // std::cout << frame[i] << std::endl;
+        }
+
+        fftw_free(temp_fft);
+        free(fresp);
     }
 
 };
@@ -509,5 +520,100 @@ struct SpatialNeighs
 
 SpatialNeighs spatial_match(CartesianPoint* target, HrirDatasetRead* dataset);
 void cross_fade(double* prev_kernel, double* current_kernel, size_t transition_length);
+
+struct CacheNode
+{
+public:
+    std::string key;
+    void* value;
+    CacheNode* prev_node;
+    CacheNode* next_node;
+
+    CacheNode(const std::string& key_, void* value_)
+    : key(key_), value(value_), prev_node(nullptr), next_node(nullptr)
+    { }
+};
+
+class LRUCache
+{
+public:
+    size_t capacity;
+    std::unordered_map<std::string, CacheNode*>* cache;
+    CacheNode* head;
+    CacheNode* tail;
+
+    LRUCache(size_t cache_size) {
+        this->capacity = cache_size;
+        this->cache = new std::unordered_map<std::string, CacheNode*>();
+        this->head = new CacheNode("HEAD", nullptr);
+        this->tail = new CacheNode("TAIL", nullptr);
+        this->head->next_node = this->tail;
+        this->tail->prev_node = this->head;
+    }
+
+    ~LRUCache() {
+        CacheNode* node = head;
+        while (node != nullptr) {
+            CacheNode* next = node->next_node;
+            delete node;
+            node = next;
+        }
+        delete cache;
+    }
+
+    void put(const std::string& k, void* value) {
+        if (this->cache->contains(k)) {
+            this->move_to_head((*this->cache)[k]);
+        } else {
+            (*this->cache)[k] = new CacheNode(k, value);
+            this->add((*this->cache)[k]);
+        }
+
+        if (this->cache->size() > this->capacity) {
+            CacheNode* lru = this->tail->prev_node;
+            this->remove(lru);
+            delete (Hrir*) lru->value;
+            this->cache->erase(lru->key);
+            delete lru;
+        }
+    }
+
+    void* get(const std::string& k) {
+        if (this->cache->contains(k)) {
+           CacheNode* node = (*this->cache)[k];
+           this->move_to_head(node);
+           return node->value;
+        }
+        return nullptr;
+    }
+
+    bool contains(std::string& k) {
+        return this->cache->contains(k);
+    }
+
+
+private:
+    void remove(CacheNode* node) {
+        CacheNode* prev = node->prev_node;
+        CacheNode* next = node->next_node;
+        prev->next_node = next;
+        next->prev_node = prev;
+    }
+
+    void add(CacheNode* node) {
+        node->next_node = this->head->next_node;
+        node->prev_node = this->head;
+        this->head->next_node->prev_node = node;
+        this->head->next_node = node;
+    }
+
+    void move_to_head(CacheNode* node) {
+        this->remove(node);
+        this->add(node);
+    }
+
+};
+
+
 
 #endif

@@ -1,9 +1,14 @@
 // #include "src/htools.hpp"
-#include "src/hbuilder.hpp"
+// #include "src/hbuilder.hpp"
 #include "src/htools.hpp"
+#include "src/hybri.hpp"
 #include <cstddef>
+#include <chrono>
+#include <ratio>
 
 #define HRIR_DATASET_PATH ("/Users/pm/AcaHub/Coding/BinauralSpatial/data/HRIR-KEMAR_DATASET.h5")
+#define FS (44100.0)
+#define CHUNK (2048)
 
 int main(void) {
     // HRIR dataset test
@@ -34,21 +39,34 @@ int main(void) {
     AirData air_data;
     std::cout << air_data.kelvin << std::endl;
 
-    HBuilder hb(HRIR_DATASET_PATH);
-    hb.set_air_condition(&air_data);
+    // HBuilder hb(HRIR_DATASET_PATH);
+    // hb.set_air_condition(&air_data);
 
-    PolarPoint target(1.7, 10, 90, AngleMode::DEGREE);
+    // Hrir* kernel = new Hrir();
+    // double azi = 0.0;
+    // while (azi < 360.0) {
+    //     auto start = std::chrono::high_resolution_clock::now();
+    //     PolarPoint target(3.0, 10.7, azi, AngleMode::DEGREE);
 
-    hb.hmatching(&target);
+    //     hb.hmatching(&target);
 
-    double* kernel = nullptr;
-    hb.build_kernel(&kernel);
+    //     hb.build_kernel(kernel);
 
-    std::cout << kernel << std::endl;
+    //     // std::cout << kernel->left_channel<< std::endl;
+    //     auto end = std::chrono::high_resolution_clock::now();
+    //     std::chrono::duration<double, std::milli> elapsed = end - start;
+    //     std::cout << "[INFO] TIME: " << elapsed << std::endl;
+    //     azi += 0.1;
+    // }
 
-    free(kernel);
+    // delete kernel;
 
+    Hybrizone hybri(HRIR_DATASET_PATH, CHUNK, FS);
+    hybri.set_air_condition(air_data);
 
+    PolarPoint target(3.0, 10.7, 90.0, AngleMode::DEGREE);
+    hybri.set_target_position(target);
+    hybri.generate_kernels();
 
     return 0;
 }

@@ -1,4 +1,5 @@
  -std=c++2b
+ -fopenmp
  -lhdf5
  -lhdf5_cpp
  -lfftw3
