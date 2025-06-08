@@ -93,11 +93,13 @@ void fft_convolve(double** buffer, double* x, double* kernel, size_t x_size, siz
     memcpy(k_padded, kernel, sizeof(double) * k_size);
 
     size_t half_size = conv_size / 2 + 1;
-    fftw_complex* xfft = (fftw_complex*) fftw_malloc(sizeof(double) * half_size);
-    fftw_complex* kfft = (fftw_complex*) fftw_malloc(sizeof(double) * half_size);
+    fftw_complex* xfft = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * half_size);
+    fftw_complex* kfft = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * half_size);
 
     fftw_plan px = fftw_plan_dft_r2c_1d(conv_size, x_padded, xfft, FFTW_MEASURE);
+    fftw_execute(px);
     fftw_plan pk = fftw_plan_dft_r2c_1d(conv_size, k_padded, kfft, FFTW_MEASURE);
+    fftw_execute(pk);
 
     fftw_complex* ifft_in = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * half_size);
     for (size_t i = 0; i < half_size; ++i) {
@@ -110,6 +112,7 @@ void fft_convolve(double** buffer, double* x, double* kernel, size_t x_size, siz
 
     double* ifft_out = (double*) malloc(sizeof(double) * conv_size);
     fftw_plan pifft = fftw_plan_dft_c2r_1d(conv_size, ifft_in, ifft_out, FFTW_MEASURE);
+    fftw_execute(pifft);
 
     size_t length = conv_size;
     size_t offset = 0;
@@ -117,6 +120,12 @@ void fft_convolve(double** buffer, double* x, double* kernel, size_t x_size, siz
         length = x_size >= k_size ? x_size : k_size;
         offset = (conv_size - length) / 2;
     }
+
+    // std::transform(
+    //     ifft_out, ifft_out + conv_size, ifft_out, [&conv_size](double x) {
+    //         return x / (double) conv_size;
+    //     }
+    // );
 
     *buffer = (double*) malloc(sizeof(double) * length);
     memcpy(*buffer, ifft_out + offset, sizeof(double) * length);

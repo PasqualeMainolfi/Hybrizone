@@ -12,7 +12,6 @@
 #include <iostream>
 #include <string>
 
-
 class RBuilder
 {
 public:
@@ -30,7 +29,8 @@ public:
         this->fs = sample_rate;
         this->cache = new LRUCache(CACHE_CAPACITY, CacheType::RIR);
         this->current_cache_key = "";
-        this->prev_distance = nullptr;
+        this->prev_distance = (double*) malloc(sizeof(double));
+        *this->prev_distance = -1.0;
         this->prev_distance_rir = nullptr;
 
         this->geometric_attenuation = new GeometricAttenuation(this->fs, 1);
@@ -63,6 +63,9 @@ public:
             RirFromDataset rir_b;
             this->dataset->get_rdata(&rir_b, index_b);
 
+            size_t rir_size = std::max(rir_a.lenght, rir_b.lenght);
+            // std::cout << rir_size << " : " << rir_a.lenght << " : " << rir_b.lenght << std::endl;
+
             if (rir_a.lenght < rir_b.lenght) {
                 double* temp = (double*) malloc(sizeof(double) * rir_b.lenght);
                 memset(temp, 0, sizeof(double) * rir_b.lenght);
@@ -81,7 +84,6 @@ public:
                 rir_b.lenght = rir_a.lenght;
             }
 
-            size_t rir_size = std::max(rir_a.lenght, rir_b.lenght);
             size_t fftw_size = rir_size / 2 + 1;
 
             Morphdata md;
@@ -115,15 +117,13 @@ public:
         }
     }
 
-    void get_hybrid_rir(double** rir_buffer, double direction, CurveMode curve_mode, double distance) {
+    void build_hybrid_rir(Rir* rir, double direction, CurveMode curve_mode, double distance) {
         if (this->current_cache_key == "") {
             std::cerr << "[ERROR] Set RIRs first!" << std::endl;
             std::exit(1);
         }
 
         Morphdata* md = (Morphdata*) this->cache->get(this->current_cache_key);
-
-        *rir_buffer = (double*) malloc(sizeof(double) * md->lenght);
 
         double factor = this->non_linear_morph_curve(direction, curve_mode);
         double sx = std::max(1.0 - 2.0 * factor, 0.0);
@@ -153,7 +153,7 @@ public:
         double* current_temp = (double*) malloc(sizeof(double) * md->lenght);
         memcpy(current_temp, temp_morphed, sizeof(double) * md->lenght);
 
-        if (this->prev_distance) {
+        if (*this->prev_distance != -1.0) {
             double d = std::abs(distance - *this->prev_distance);
             if (d > MAX_CROSSFADE_DISTANCE) {
                 double tlength = (size_t) (INTERNAL_KERNEL_TRANSITION * this->fs);
@@ -166,7 +166,10 @@ public:
         this->prev_distance_rir = prev_temp;
 
         memcpy(this->prev_distance_rir, current_temp, md->lenght);
-        memcpy(*rir_buffer, temp_morphed, sizeof(double) * md->lenght);
+
+        rir->rir = (double*) malloc(sizeof(double) * md->lenght);
+        memcpy(rir->rir, temp_morphed, sizeof(double) * md->lenght);
+        rir->length = md->lenght;
 
         free(temp_morphed);
         free(current_temp);
@@ -187,18 +190,25 @@ private:
         fftw_complex* db = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * fft_size);
         double mag_max = -1e9;
         for (size_t i = 0; i < fft_size; ++i) {
-            std::complex<double> z(x[i][0], x[i][0]);
+            std::complex<double> z(x[i][0], x[i][1]);
             double mag = std::abs(z);
             mag_max = std::max(mag_max, mag);
             db[i][0] = std::log10(mag + 1e-12);
             db[i][1] = 0.0;
         }
 
+
         double* rc = (double*) malloc(sizeof(double) * frame_size);
         fftw_plan ifft = fftw_plan_dft_c2r_1d(frame_size, db, rc, FFTW_MEASURE);
         fftw_execute(ifft);
         fftw_destroy_plan(ifft);
         fftw_free(db);
+
+        std::transform(
+            rc, rc + frame_size, rc, [&frame_size](double x) {
+                return x / (double) frame_size;
+            }
+        );
 
         fftw_complex* realcep = (fftw_complex*) malloc(sizeof(fftw_complex) * fft_size);
         fftw_plan fft = fftw_plan_dft_r2c_1d(frame_size, rc, realcep, FFTW_MEASURE);
@@ -214,14 +224,14 @@ private:
             rc_mean += re;
         }
 
-        fftw_free(realcep);
-
         rc_mean /= (double) fft_size;
 
         for (size_t i = 0; i < fft_size; ++i) {
             double value = realcep_real[i];
             realcep_real[i] = std::exp(value - rc_mean);
         }
+
+        fftw_free(realcep);
 
         size_t kernel_length = (size_t) (fft_size * smooth_factor);
         double* smooth_kernel = (double*) malloc(sizeof(double) * kernel_length);
@@ -247,6 +257,7 @@ private:
             }
         );
 
+        *y = (double*) malloc(sizeof(double) * fft_size);
         memcpy(*y, rc_smoothed, sizeof(double) * fft_size);
         free(rc_smoothed);
     }

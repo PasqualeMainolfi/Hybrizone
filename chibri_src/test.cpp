@@ -1,11 +1,12 @@
 // #include "src/htools.hpp"
 // #include "src/hbuilder.hpp"
-// #include "src/hybri.hpp"
+#include "src/hybri.hpp"
 #include "src/htools.hpp"
-#include "src/rbuilder.hpp"
+#include "src/hybri.hpp"
+// #include "src/rbuilder.hpp"
 #include <cstddef>
-#include <chrono>
-#include <ratio>
+// #include <chrono>
+// #include <ratio>
 
 #define HRIR_DATASET_PATH ("/Users/pm/AcaHub/Coding/BinauralSpatial/data/HRIR-KEMAR_DATASET.h5")
 #define RIR_DATASET_PATH ("/Users/pm/AcaHub/Coding/BinauralSpatial/data/RIR-MIT_SURVEY.h5")
@@ -63,15 +64,28 @@ int main(void) {
 
     // delete kernel;
 
-    // Hybrizone hybri(HRIR_DATASET_PATH, CHUNK, FS);
-    // hybri.set_air_condition(air_data);
+    Hybrizone hybri(HRIR_DATASET_PATH, RIR_DATASET_PATH, CHUNK, FS);
+    hybri.set_air_condition(air_data);
+    hybri.set_rirs(10, 100, 0.1);
 
-    // PolarPoint target(3.0, 10.7, 90.0, AngleMode::DEGREE);
-    // hybri.set_target_position(target);
-    // hybri.generate_kernels();
-    //
+    PolarPoint target(3.0, 10.7, 90.0, AngleMode::DEGREE);
+    hybri.set_target_position(target);
 
-    RBuilder rb(RIR_DATASET_PATH, 1.7, FS);
+    hybri.set_hybrid_rir_params(0.37, CurveMode::SIGMOID);
+
+    Kernels kernels;
+    hybri.generate_kernels(&kernels);
+
+
+    // RBuilder rb(RIR_DATASET_PATH, 1.7, FS);
+    // rb.set_air_condition(&air_data);
+    // rb.set_rirs(10, 100, 0.1);
+
+    // Rir rir;
+    // rb.build_hybrid_rir(&rir, 0.37, CurveMode::SIGMOID, 1.7);
+
+
+
 
     return 0;
 }

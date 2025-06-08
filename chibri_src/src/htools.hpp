@@ -184,8 +184,17 @@ struct Hrir
     : left_channel(nullptr), right_channel(nullptr), channel_length(0)
     { }
 
-    Hrir(double* left, double* right, size_t buffer_size)
-    : channel_length(buffer_size)
+    Hrir(const Hrir& h)
+    : channel_length(h.channel_length)
+    {
+        this->left_channel = (double*) malloc(sizeof(double) * this->channel_length);
+        this->right_channel = (double*) malloc(sizeof(double) * this->channel_length);
+        memcpy(this->left_channel, h.left_channel, sizeof(double) * this->channel_length);
+        memcpy(this->right_channel, h.right_channel, sizeof(double) * this->channel_length);
+    }
+
+    Hrir(double* left, double* right, size_t channel_length)
+    : channel_length(channel_length)
     {
         this->left_channel = (double*) malloc(sizeof(double) * this->channel_length);
         this->right_channel = (double*) malloc(sizeof(double) * this->channel_length);
@@ -549,16 +558,18 @@ struct Morphdata
     { }
 
     Morphdata(const Morphdata& other) {
-        this->source_a = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * this->fftw_length);
-        this->source_b = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * this->fftw_length);
-        this->morphed = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * this->fftw_length);
-        memcpy(this->source_a, other.source_a, this->fftw_length);
-        memcpy(this->source_b, other.source_b, this->fftw_length);
-        memcpy(this->morphed, other.morphed, this->fftw_length);
-
         this->smooth_factor = other.smooth_factor;
         this->lenght = other.lenght;
         this->fftw_length = other.fftw_length;
+
+        this->source_a = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * this->fftw_length);
+        this->source_b = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * this->fftw_length);
+        this->morphed = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * this->fftw_length);
+
+        memcpy(this->source_a, other.source_a, sizeof(fftw_complex) * this->fftw_length);
+        memcpy(this->source_b, other.source_b, sizeof(fftw_complex) * this->fftw_length);
+        memcpy(this->morphed, other.morphed, sizeof(fftw_complex) * this->fftw_length);
+
     }
 
     ~Morphdata() {
@@ -631,7 +642,16 @@ public:
         if (this->cache->size() > this->capacity) {
             CacheNode* lru = this->tail->prev_node;
             this->remove(lru);
-            delete (Hrir*) lru->value;
+
+            switch (this->ctype) {
+                case CacheType::HRIR:
+                    delete (Hrir*) lru->value;
+                    break;
+                case CacheType::RIR:
+                    delete (Morphdata*) lru->value;
+                    break;
+            }
+
             this->cache->erase(lru->key);
             delete lru;
         }
@@ -695,6 +715,33 @@ struct RirFromDataset
     }
 };
 
+struct Rir
+{
+    double* rir;
+    size_t length;
+
+    Rir()
+    : rir(nullptr), length(0)
+    { }
+
+    Rir(const Rir& r) {
+        this->rir = (double*) malloc(sizeof(double) * length);
+        memcpy(this->rir, r.rir, sizeof(double) * length);
+        this->length = r.length;
+    }
+
+    Rir(double* buffer, size_t channel_length) {
+        this->rir = (double*) malloc(sizeof(double) * channel_length);
+        memcpy(this->rir, buffer, sizeof(double) * channel_length);
+        this->length = channel_length;
+    }
+
+    ~Rir() {
+        if (this->rir) free(this->rir);
+    }
+};
+
+
 class RirDatasetRead
 {
 public:
@@ -738,13 +785,13 @@ public:
         hsize_t dim[1];
         space.getSimpleExtentDims(dim);
 
-        float* temp = (float*) realloc(this->temp_rir, sizeof(float) * dim[0]);
+        double* temp = (double*) realloc(this->temp_rir, sizeof(double) * dim[0]);
         this->temp_rir = temp;
-        r.read(this->temp_rir, H5::PredType::NATIVE_FLOAT);
+        r.read(this->temp_rir, H5::PredType::NATIVE_DOUBLE);
 
         rir_buffer->rir = (double*) malloc(sizeof(double) * dim[0]);
         rir_buffer->lenght = dim[0];
-        memcpy(rir_buffer->rir, (double*) this->temp_rir, sizeof(double) * dim[0]);
+        memcpy(rir_buffer->rir, this->temp_rir, sizeof(double) * dim[0]);
     }
 
     double get_sample_rate() {
@@ -754,7 +801,7 @@ public:
 private:
     size_t data_length;
     int64_t sample_rate;
-    float* temp_rir;
+    double* temp_rir;
 };
 
 #endif

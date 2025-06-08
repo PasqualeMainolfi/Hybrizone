@@ -59,6 +59,7 @@ struct HInfo
 class HBuilder
 {
 public:
+    HrirDatasetRead* dataset;
     size_t size;
     size_t hsize;
     double fs;
@@ -208,7 +209,6 @@ public:
     }
 
 private:
-    HrirDatasetRead* dataset;
     GeometricAttenuation* geometric_attenuation;
     ISO9613Filter* iso9613;
     double* db_attenuation;
