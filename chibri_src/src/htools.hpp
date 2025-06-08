@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <format>
@@ -58,6 +59,18 @@ inline void unwrap_phase(double* x, size_t length) {
         prev_right = x[ri];
     }
 }
+
+enum ConvMode
+{
+    FULL,
+    SAME
+};
+
+enum CacheType
+{
+    HRIR,
+    RIR
+};
 
 enum HDataType
 {
@@ -520,6 +533,40 @@ struct SpatialNeighs
 
 SpatialNeighs spatial_match(CartesianPoint* target, HrirDatasetRead* dataset);
 void cross_fade(double* prev_kernel, double* current_kernel, size_t transition_length);
+void fft_convolve(double** buffer, double* x, double* kernel, size_t x_size, size_t k_size, ConvMode conv_mode);
+
+struct Morphdata
+{
+    fftw_complex* source_a;
+    fftw_complex* source_b;
+    fftw_complex* morphed;
+    double smooth_factor;
+    size_t lenght;
+    size_t fftw_length;
+
+    Morphdata()
+    : source_a(nullptr), source_b(nullptr), morphed(nullptr), smooth_factor(0.0), lenght(0), fftw_length(0)
+    { }
+
+    Morphdata(const Morphdata& other) {
+        this->source_a = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * this->fftw_length);
+        this->source_b = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * this->fftw_length);
+        this->morphed = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * this->fftw_length);
+        memcpy(this->source_a, other.source_a, this->fftw_length);
+        memcpy(this->source_b, other.source_b, this->fftw_length);
+        memcpy(this->morphed, other.morphed, this->fftw_length);
+
+        this->smooth_factor = other.smooth_factor;
+        this->lenght = other.lenght;
+        this->fftw_length = other.fftw_length;
+    }
+
+    ~Morphdata() {
+        fftw_free(this->source_a);
+        fftw_free(this->source_b);
+        fftw_free(this->morphed);
+    }
+};
 
 struct CacheNode
 {
@@ -538,12 +585,14 @@ class LRUCache
 {
 public:
     size_t capacity;
+    CacheType ctype;
     std::unordered_map<std::string, CacheNode*>* cache;
     CacheNode* head;
     CacheNode* tail;
 
-    LRUCache(size_t cache_size) {
+    LRUCache(size_t cache_size, CacheType cache_type) {
         this->capacity = cache_size;
+        this->ctype = cache_type;
         this->cache = new std::unordered_map<std::string, CacheNode*>();
         this->head = new CacheNode("HEAD", nullptr);
         this->tail = new CacheNode("TAIL", nullptr);
@@ -555,6 +604,16 @@ public:
         CacheNode* node = head;
         while (node != nullptr) {
             CacheNode* next = node->next_node;
+
+            switch (this->ctype) {
+                case CacheType::HRIR:
+                    delete (Hrir*) node->value;
+                    break;
+                case CacheType::RIR:
+                    delete (Morphdata*) node->value;
+                    break;
+            }
+
             delete node;
             node = next;
         }
@@ -614,6 +673,88 @@ private:
 
 };
 
+enum CurveMode
+{
+    LINEAR,
+    SIGMOID,
+    EXPONENTIAL,
+    LOGARITHMIC
+};
 
+struct RirFromDataset
+{
+    double* rir;
+    size_t lenght;
+
+    RirFromDataset()
+    : rir(nullptr), lenght(0)
+    { }
+
+    ~RirFromDataset() {
+        free(this->rir);
+    }
+};
+
+class RirDatasetRead
+{
+public:
+    H5::H5File rdata;
+    char** ir_keys;
+
+    RirDatasetRead() = default;
+    RirDatasetRead(const char* dataset_path) {
+        this->rdata = H5::H5File(dataset_path, H5F_ACC_RDONLY);
+
+        H5::Attribute keys = this->rdata.openAttribute("IR-keys");
+        H5::StrType string_type(H5::PredType::C_S1, H5T_VARIABLE);
+        string_type.setCset(H5T_CSET_UTF8);
+        string_type.setStrpad(H5T_STR_NULLTERM);
+
+        H5::DataSpace space = keys.getSpace();
+        hsize_t dim[1];
+        space.getSimpleExtentDims(dim);
+        this->ir_keys = new char*[dim[0]];
+        keys.read(string_type, this->ir_keys);
+        this->data_length = dim[0];
+
+        H5::Attribute fs = this->rdata.openAttribute("fs");
+        fs.read(H5::PredType::NATIVE_INT64, &this->sample_rate);
+
+        this->temp_rir = nullptr;
+    }
+
+    ~RirDatasetRead() {
+        for (size_t i = 0; i < this->data_length; ++i) {
+            free(this->ir_keys[i]);
+        }
+        delete[] this->ir_keys;
+        if (this->temp_rir) free(this->temp_rir);
+    }
+
+    void get_rdata(RirFromDataset* rir_buffer, size_t index) {
+        const char* key = this->ir_keys[index];
+        H5::DataSet r = this->rdata.openDataSet(key);
+        H5::DataSpace space = r.getSpace();
+        hsize_t dim[1];
+        space.getSimpleExtentDims(dim);
+
+        float* temp = (float*) realloc(this->temp_rir, sizeof(float) * dim[0]);
+        this->temp_rir = temp;
+        r.read(this->temp_rir, H5::PredType::NATIVE_FLOAT);
+
+        rir_buffer->rir = (double*) malloc(sizeof(double) * dim[0]);
+        rir_buffer->lenght = dim[0];
+        memcpy(rir_buffer->rir, (double*) this->temp_rir, sizeof(double) * dim[0]);
+    }
+
+    double get_sample_rate() {
+        return (double) this->sample_rate;
+    }
+
+private:
+    size_t data_length;
+    int64_t sample_rate;
+    float* temp_rir;
+};
 
 #endif

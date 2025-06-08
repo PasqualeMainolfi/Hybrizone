@@ -91,7 +91,7 @@ public:
         this->prev_left_channel = (double*) malloc(sizeof(double) * this->hsize);
         this->prev_right_channel = (double*) malloc(sizeof(double) * this->hsize);
 
-        this->cache = new LRUCache(CACHE_CAPACITY);
+        this->cache = new LRUCache(CACHE_CAPACITY, CacheType::HRIR);
         this->is_present = (bool*) malloc(sizeof(bool));
         this->temp_key = "";
     }
@@ -108,6 +108,7 @@ public:
             delete this->iso9613;
         }
 
+        delete this->dataset;
         delete this->geometric_attenuation;
         delete this->hinfo;
         delete this->cache;

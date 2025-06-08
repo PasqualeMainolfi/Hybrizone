@@ -1,12 +1,14 @@
 // #include "src/htools.hpp"
 // #include "src/hbuilder.hpp"
+// #include "src/hybri.hpp"
 #include "src/htools.hpp"
-#include "src/hybri.hpp"
+#include "src/rbuilder.hpp"
 #include <cstddef>
 #include <chrono>
 #include <ratio>
 
 #define HRIR_DATASET_PATH ("/Users/pm/AcaHub/Coding/BinauralSpatial/data/HRIR-KEMAR_DATASET.h5")
+#define RIR_DATASET_PATH ("/Users/pm/AcaHub/Coding/BinauralSpatial/data/RIR-MIT_SURVEY.h5")
 #define FS (44100.0)
 #define CHUNK (2048)
 
@@ -61,12 +63,15 @@ int main(void) {
 
     // delete kernel;
 
-    Hybrizone hybri(HRIR_DATASET_PATH, CHUNK, FS);
-    hybri.set_air_condition(air_data);
+    // Hybrizone hybri(HRIR_DATASET_PATH, CHUNK, FS);
+    // hybri.set_air_condition(air_data);
 
-    PolarPoint target(3.0, 10.7, 90.0, AngleMode::DEGREE);
-    hybri.set_target_position(target);
-    hybri.generate_kernels();
+    // PolarPoint target(3.0, 10.7, 90.0, AngleMode::DEGREE);
+    // hybri.set_target_position(target);
+    // hybri.generate_kernels();
+    //
+
+    RBuilder rb(RIR_DATASET_PATH, 1.7, FS);
 
     return 0;
 }

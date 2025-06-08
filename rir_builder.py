@@ -2,9 +2,13 @@ import numpy as np
 from numpy.typing import NDArray
 import h5py
 import hashlib
+
+import scipy.fft
+import scipy.signal
 from hybri_tools import ISO9613Filter, GeometricAttenuation, AirData, ETA, CurveMode, RData, cross_fade, LRUCache
 from hybri_tools import INTERNAL_KERNEL_TRANSITION, MAX_DISTANCE_TRANSITION, LRU_CAPACITY
 from numba import njit
+import scipy
 
 class PlotData():
     def __init__(self, t: NDArray[np.float32], f: NDArray[np.float32], mag: NDArray[np.float32], integr: NDArray[np.float32]):
@@ -22,7 +26,7 @@ class MorpData():
         return hashlib.md5(f"{self.direction}-{self.morph_curve}".encode()).hexdigest()
 
 @njit()
-def get_morphed_data(curve_value: float, source1: NDArray[np.complex64], source2: NDArray[np.float64], morphed: NDArray[np.float64]):
+def get_morphed_data(curve_value: float, source1: NDArray[np.complex64], source2: NDArray[np.float64], morphed: NDArray[np.float64]) -> NDArray[np.complex64]:
     sx = max(1.0 - 2.0 * curve_value, 0.0)  
     cx = 1.0 - abs(1.0 - 2.0 * curve_value)
     dx = max(2.0 * curve_value - 1.0, 0.0)
@@ -138,8 +142,9 @@ class RIRMorpha():
         realcp = np.exp(realcp - realcp_mean)
         
         kernel_length = int(len(realcp) * smooth_factor)
-        kernel = np.ones(kernel_length) / smooth_factor
-        rc_smoothed = np.convolve(realcp, kernel, mode="same")
+        kernel = np.ones(kernel_length) / kernel_length
+        # rc_smoothed = np.convolve(realcp, kernel, mode="same")
+        rc_smoothed = scipy.signal.fftconvolve(realcp, kernel, mode="same")
         
         scale_factor = np.max(mag) / (np.max(rc_smoothed) + 1e-12)
         return rc_smoothed * scale_factor
