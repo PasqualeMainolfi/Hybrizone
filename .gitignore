@@ -1,5 +1,6 @@
 .DS_Store
+.ropeproject/
 *.wav
-chybri/.zed
+chybri/.zed/
 chybri/**/*.o
-*.dSYM/
+chybri/builded.o.dSYM/
