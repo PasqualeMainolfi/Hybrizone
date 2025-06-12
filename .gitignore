@@ -2,5 +2,5 @@
 .ropeproject/
 *.wav
 chybri/.zed/
-chybri/**/*.o
+**/*.o
 chybri/builded.o.dSYM/
