@@ -1,2 +1,5 @@
 .DS_Store
-.wav
+*.wav
+chybri/.zed
+chybri/**/*.o
+*.dSYM/
