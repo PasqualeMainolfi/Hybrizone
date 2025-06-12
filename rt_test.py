@@ -87,7 +87,7 @@ def main() -> None:
                 else:
                     current_rho += dstep
                     
-            pos = PolarPoint(rho=current_rho, phi=curr_ele, theta=curr_azi, opt=AngleMode.DEGREE) 
+            pos = PolarPoint(rho=current_rho, phi=0.0, theta=curr_azi, opt=AngleMode.DEGREE) 
             AURALIZER.set_position(position=pos)
             
             if curr_time % 1 == 0:
@@ -100,18 +100,14 @@ def main() -> None:
 
             # generates kernels (HRIR and RIR)
             kernels = AURALIZER.get_kernels()
-            if kernels is not None:
 
-                # auralization
-                convolved_frame = AURALIZER.process_frame(frame=frame, kernels=kernels)
-                stream.write(convolved_frame.tobytes())
-                # audio = np.concatenate((audio, convolved_frame), axis=0)
+            # auralization
+            convolved_frame = AURALIZER.process_frame(frame=frame, kernels=kernels)
+            stream.write(convolved_frame.tobytes())
+            # audio = np.concatenate((audio, convolved_frame), axis=0)
 
-                mark += CHUNK
-                curr_time += 1
-            else:
-                stream.write(np.zeros((CHUNK, 2), dtype=np.float32).tobytes())
-            # time.sleep(1 / SR)
+            mark += CHUNK
+            curr_time += 1
         except KeyboardInterrupt:
             run = False
             AURALIZER.close()

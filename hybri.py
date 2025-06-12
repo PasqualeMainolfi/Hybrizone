@@ -13,6 +13,7 @@ import time
 TRANSITION_FACTOR = 0.5
 MAX_TRANSITION_SAMPLES = 512
 SOFT_CLIP_SCALE = 1.0 / 0.707
+BUFFER_MAX_SIZE = 88200
 
 class SmoothedConvolution():
     
@@ -80,7 +81,8 @@ class HybriParams():
 
 class RTOverlapSaveBufferConvolution():
     def __init__(self, chunk: int):
-        self.buffer = np.empty(0, dtype=np.float64)
+        self.init_buffer_size = BUFFER_MAX_SIZE
+        self.buffer = np.zeros(self.init_buffer_size, dtype=np.float64)
         self.chunk = chunk
         self.pkernel = None
         self.pbuffer = None
@@ -90,10 +92,20 @@ class RTOverlapSaveBufferConvolution():
         convolution = SmoothedConvolution.apply_intermediate(x=x, prev_kernel=self.pkernel, curr_kernel=kernel, transition_length=self.transition_size)
         self.pkernel = kernel.copy()
 
-        max_lenght = min(self.buffer.size, convolution.size)
-        convolution[:max_lenght] += self.buffer[:max_lenght]
-        convolved = convolution[:self.chunk].astype(np.float64)
-        self.buffer = convolution[self.chunk:]
+        convolution[:self.chunk] += self.buffer[:self.chunk]
+        
+        self.buffer = np.roll(self.buffer, -self.chunk)
+        self.buffer[-self.chunk:] = 0.0
+        convolved = convolution[:self.chunk]
+        tail_size = convolution.size - self.chunk
+        
+        if tail_size > 0:
+            if tail_size > self.init_buffer_size:
+                temp_buffer = np.zeros(tail_size, np.float64)
+                temp_buffer[:self.init_buffer_size] = self.buffer[:]
+                self.buffer = temp_buffer
+                self.init_buffer_size = tail_size
+            self.buffer[:tail_size] += convolution[self.chunk:]
         return convolved
 
 class HybriKernels():

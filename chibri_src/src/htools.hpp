@@ -9,10 +9,11 @@
 #include <cstdlib>
 #include <cstring>
 #include <format>
-#include <iostream>
 #include <fftw3.h>
+#include <numeric>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #define P_REF (101325.0)
 #define T0 (293.15)
@@ -28,6 +29,15 @@
 #define INTERNAL_KERNEL_TRANSITION  (0.003)
 #define CHANNELS (2)
 #define CACHE_CAPACITY (4096)
+#define OSA_TRANSITION_FACTOR (0.5)
+#define MAX_TRANSITION_SAMPLES (512)
+#define SOFT_CLIP_FACTOR (1.0 / 0.707)
+#define MAX_OSA_BUFFER_SIZE (22050)
+
+inline size_t next_power_of_two(size_t n) {
+    if (n == 0) return 1;
+    return static_cast<size_t>(pow(2, std::ceil(std::log2(n))));
+}
 
 inline double deg2rad(double deg_value) {
     return deg_value * M_PI / 180.0;
@@ -37,26 +47,39 @@ inline double rad2deg(double rad_value) {
     return 180.0 * rad_value / M_PI;
 }
 
-inline void unwrap_phase(double* x, size_t length) {
-    double prev_left = x[0];
-    double prev_right = x[1];
+inline void unwrap_phase(double* x, size_t half_size) {
+    // left channel
+    double left_prev = x[0];
+    double offset_l = 0.0;
+    for (size_t i = 1; i < half_size; ++i) {
+        size_t current_idx = i * 2;
+        double diff = x[current_idx] - left_prev;
+        left_prev = x[current_idx];
 
-    for (size_t i = 1; i < length; ++i) {
-        size_t li = i * 2;
-        size_t ri = li + 1;
+        if (diff > M_PI) {
+            offset_l -= TWOPI;
+        } else if (diff < -M_PI) {
+            offset_l += TWOPI;
+        }
 
-        double delta_left = x[li] - prev_left;
-        double delta_right = x[ri] - prev_right;
+        x[current_idx] += offset_l;
+    }
 
-        // Riporta delta nell'intervallo [-π, π]
-        if (delta_left > M_PI) x[li] -= TWOPI;
-        else if (delta_left < -M_PI) x[li] += TWOPI;
+    // right channel
+    double right_prev = x[1];
+    double offset_r = 0.0;
+    for (size_t i = 1; i < half_size; ++i) {
+        size_t current_idx = i * 2 + 1;
+        double diff = x[current_idx] - right_prev;
+        right_prev = x[current_idx];
 
-        if (delta_right > M_PI) x[ri] -= TWOPI;
-        else if (delta_right < -M_PI) x[ri] += TWOPI;
+        if (diff > M_PI) {
+            offset_r -= TWOPI;
+        } else if (diff < -M_PI) {
+            offset_r += TWOPI;
+        }
 
-        prev_left = x[li];
-        prev_right = x[ri];
+        x[current_idx] += offset_r;
     }
 }
 
@@ -76,8 +99,7 @@ enum HDataType
 {
     HTIME,
     HMAG,
-    HANGLE,
-    HITD
+    HANGLE
 };
 
 enum AngleMode
@@ -169,52 +191,80 @@ public:
     }
 
     std::string get_polar_key() {
-        return std::format("{:.5f}:{:.5f}:{:.5f}", this->rho, this->phi, this->theta);
+        return std::format("{:.5f}_{:.5f}_{:.5f}", this->rho, this->phi, this->theta);
     }
 
 };
 
+struct SlerpCoeff
+{
+    double a;
+    double b;
+};
+
+inline SlerpCoeff slerp_coefficients(CartesianPoint* p, CartesianPoint* p1, CartesianPoint* p2) {
+    CartesianPoint trgnorm = p->normalize();
+    CartesianPoint h1norm = p1->normalize();
+    CartesianPoint h2norm = p2->normalize();
+
+    double dot = h1norm.x * h2norm.x + h1norm.y * h2norm.y + h1norm.z * h2norm.z;
+    dot = std::min(std::max(dot, -1.0), 1.0);
+    double omega = std::acos(dot);
+
+    double a, b;
+    if (omega == 0.0) {
+        a = 0.0;
+        b = 1.0;
+    } else {
+        double tdot1 = trgnorm.x * h1norm.x + trgnorm.y * h1norm.y + trgnorm.z * h1norm.z;
+        tdot1 = std::min(std::max(tdot1, -1.0), 1.0);
+        double omega1 = acos(tdot1);
+        double tdot2 = trgnorm.x * h2norm.x + trgnorm.y * h2norm.y + trgnorm.z * h2norm.z;
+        tdot2 = std::min(std::max(tdot2, -1.0), 1.0);
+        double omega2 = acos(tdot2);
+        double sin_omega = sin(omega);
+        double alpha = omega1 / (omega1 + omega2);
+        a = sin((1.0 - alpha) * omega) / sin_omega;
+        b = sin(alpha * omega) / sin_omega;
+    }
+
+    return SlerpCoeff { .a = a, .b = b};
+};
+
 struct Hrir
 {
-    double* left_channel;
-    double* right_channel;
+    std::vector<double> left_channel;
+    std::vector<double> right_channel;
     size_t channel_length;
 
     Hrir()
-    : left_channel(nullptr), right_channel(nullptr), channel_length(0)
+    : left_channel(std::vector<double>()), right_channel(std::vector<double>()), channel_length(0)
     { }
 
     Hrir(const Hrir& h)
     : channel_length(h.channel_length)
     {
-        this->left_channel = (double*) malloc(sizeof(double) * this->channel_length);
-        this->right_channel = (double*) malloc(sizeof(double) * this->channel_length);
-        memcpy(this->left_channel, h.left_channel, sizeof(double) * this->channel_length);
-        memcpy(this->right_channel, h.right_channel, sizeof(double) * this->channel_length);
+        this->left_channel.resize(this->channel_length);
+        this->right_channel.resize(this->channel_length);
+        memcpy(this->left_channel.data(), h.left_channel.data(), sizeof(double) * this->channel_length);
+        memcpy(this->right_channel.data(), h.right_channel.data(), sizeof(double) * this->channel_length);
     }
 
     Hrir(double* left, double* right, size_t channel_length)
     : channel_length(channel_length)
     {
-        this->left_channel = (double*) malloc(sizeof(double) * this->channel_length);
-        this->right_channel = (double*) malloc(sizeof(double) * this->channel_length);
-        memcpy(this->left_channel, left, sizeof(double) * this->channel_length);
-        memcpy(this->right_channel, right, sizeof(double) * this->channel_length);
+        this->left_channel.resize(this->channel_length);
+        this->right_channel.resize(this->channel_length);
+        memcpy(this->left_channel.data(), left, sizeof(double) * this->channel_length);
+        memcpy(this->right_channel.data(), right, sizeof(double) * this->channel_length);
     }
 
-    ~Hrir() {
-        if (this->left_channel) free(this->left_channel);
-        if (this->right_channel) free(this->right_channel);
-    }
+    ~Hrir() { }
 };
-
 
 class HrirDatasetRead
 {
     H5::H5File hdata;
-    H5::Group ghrir;
-    H5::Group ghrtf;
-    H5::Group gitd;
     int* polar_index;
     double* regular_coords;
     HShape hrir_shape;
@@ -223,12 +273,8 @@ class HrirDatasetRead
     size_t dataset_size;
 
 public:
-    HrirDatasetRead() = default;
     HrirDatasetRead(const char* dataset_path) {
         this->hdata = H5::H5File(dataset_path, H5F_ACC_RDONLY);
-        this->ghrir = this->hdata.openGroup("hrir");
-        this->ghrtf = this->hdata.openGroup("hrir_fft");
-        this->gitd = this->hdata.openGroup("hrir_itd");
 
         // read polar indexes
         H5::DataSet pindex = this->hdata.openDataSet("polar_index");
@@ -267,39 +313,36 @@ public:
     }
 
     // function can return hrir, itd, hrtf mag and angle
-    void get_hrir_data(double** buffer, const char* key, HDataType data_type) {
+    void get_hrir_data(std::vector<double>* buffer, const char* key, HDataType data_type) {
         H5::DataSet h;
-        H5::Group fft_group;
+        std::string k;
         hsize_t dims[2];
         switch (data_type) {
             case HDataType::HTIME:
-                h = this->ghrir.openDataSet(key);
+                k = std::format("/hrir/{}", key);
+                h = this->hdata.openDataSet(k);
                 break;
             case HDataType::HMAG:
-                fft_group = this->ghrtf.openGroup(key);
-                h = fft_group.openDataSet("mag");
+                k = std::format("/hrir_fft/{}/mag", key);
+                h = this->hdata.openDataSet(k);
                 break;
             case HDataType::HANGLE:
-                fft_group = this->ghrtf.openGroup(key);
-                h = fft_group.openDataSet("angle");
-                break;
-            case HDataType::HITD:
-                h = this->gitd.openDataSet(key);
+                k = std::format("/hrir_fft/{}/angle", key);
+                h = this->hdata.openDataSet(k);
                 break;
         }
 
         H5::DataSpace dataspace = h.getSpace();
-        int ndims = dataspace.getSimpleExtentDims(dims);
-        int d = (ndims > 0) ? ndims : 1;
-        size_t buffer_size = ndims == 2 ? dims[0] * dims[1] : d;
-        *buffer = (double*) malloc(sizeof(double) * buffer_size);
+        dataspace.getSimpleExtentDims(dims);
+        size_t buffer_size = dims[0] * dims[1];
+        buffer->resize(buffer_size);
+        h.read(buffer->data(), H5::PredType::NATIVE_DOUBLE);
+    }
 
-        if (*buffer == nullptr && buffer_size > 0) {
-            std::cerr << "[ERROR] Bad alloc in HRIR allocation!";
-            std::exit(1);
-        }
-
-        h.read(*buffer, H5::PredType::NATIVE_DOUBLE);
+    void get_itd(double* buffer, const char* key) {
+        std::string k = std::format("hrir_itd/{}", key);
+        H5::DataSet h = this->hdata.openDataSet(k);
+        h.read(buffer, H5::PredType::NATIVE_DOUBLE);
     }
 
     CartesianPoint get_cartesian_reference(int index) {
@@ -328,7 +371,6 @@ public:
     size_t get_dataset_size() {
         return this->dataset_size;
     }
-
 };
 
 struct AirData
@@ -352,7 +394,6 @@ public:
 
 // interpolator
 void lerp(double* x, double* y, double* xnew, double* yout, size_t xsize, size_t xnew_size, bool fill_value);
-
 // itd calculation
 double woodworth_itd3d(const PolarPoint& p);
 
@@ -365,23 +406,20 @@ public:
     : air_data(air_condition)
     {
         this->sample_rate = fs;
-        this->frequencies = (double*) malloc(sizeof(double) * NFREQS);
-        this->fnorm = (double*) malloc(sizeof(double) * NFREQS);
+        this->frequencies = std::vector<double>(NFREQS, 0.0);
+        this->fnorm = std::vector<double>(NFREQS, 0.0);
 
-        double fstep = (this->sample_rate / 2.0) / static_cast<double>(NFREQS - 1);
+        double nyq = this->sample_rate / 2.0;
+        double fstep = nyq / static_cast<double>(NFREQS - 1);
         for (size_t i = 0; i < NFREQS; ++i) {
             double value = i * fstep;
             this->frequencies[i] = value;
-            this->fnorm[i] = value / (this->sample_rate / 2.0);
+            this->fnorm[i] = value / nyq;
         }
 
     }
 
-    ~ISO9613Filter() {
-        free(this->frequencies);
-        free(this->fnorm);
-        // free(this->fresp);
-    }
+    ~ISO9613Filter() = default;
 
     void get_attenuation_air_absorption(double* alpha) {
         double p_sat = P_REF * (pow(10.0, (-6.8346 * pow((273.16 / this->air_data->kelvin), 1.261) + 4.6151)));
@@ -390,7 +428,6 @@ public:
         double tr_pos = pow(tr, 0.5);
         double tr_neg1 = pow(tr, -0.5);
         double tr_neg2 = pow(tr, -2.5);
-
 
         double f_rO = this->air_data->p_atm * (24.0 + 4.04e4 * h * (0.02 + h) / (0.391 + h));
 
@@ -414,35 +451,36 @@ public:
     void air_absorption_filter(double* frame, double* alpha, double distance, size_t frame_size) {
         double rdist = std::max(0.0, distance);
 
+        std::vector<double> new_alpha(NFREQS);
         for (size_t i = 0; i < NFREQS; ++i) {
             double db_attenuation = alpha[i] * rdist;
-            alpha[i] = pow(10.0, -db_attenuation / 20.0);
+            new_alpha[i] = pow(10.0, -db_attenuation / 20.0);
         }
-        alpha[NFREQS - 1] = 0.0;
-        this->multiband_fft_filter(frame, alpha, frame_size);
+
+        new_alpha[NFREQS - 1] = 0.0;
+        this->multiband_fft_filter(frame, new_alpha.data(), frame_size);
     }
 
 private:
     double sample_rate;
-    double* frequencies;
-    double* fnorm;
+    std::vector<double> frequencies;
+    std::vector<double> fnorm;
 
     // multiband filter (apply on a single channel Left and Right)
     void multiband_fft_filter(double* frame, double* alpha, size_t frame_size) {
         size_t half_size = frame_size / 2 + 1;
         double step = 1.0 / static_cast<double>(half_size - 1);
 
-        double* ftemp = (double*) malloc(sizeof(double) * half_size);
+        std::vector<double> ftemp(half_size, 0.0);
         for (size_t i = 0; i < half_size; ++i) {
             ftemp[i] = step * (double) i;
         }
 
-        double* fresp = (double*) malloc(sizeof(double) * half_size);
-        lerp(this->fnorm, alpha, ftemp, fresp, NFREQS, half_size, false);
-        free(ftemp);
+        std::vector<double> fresp(half_size, 0.0);
+        lerp(this->fnorm.data(), alpha, ftemp.data(), fresp.data(), NFREQS, half_size, false);
 
         fftw_complex* temp_fft = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * half_size);
-        fftw_plan fft_plan = fftw_plan_dft_r2c_1d(frame_size, frame, temp_fft, FFTW_MEASURE);
+        fftw_plan fft_plan = fftw_plan_dft_r2c_1d(frame_size, frame, temp_fft, FFTW_ESTIMATE);
         fftw_execute(fft_plan);
         fftw_destroy_plan(fft_plan);
 
@@ -459,11 +497,9 @@ private:
 
         for (size_t i = 0; i < frame_size; ++i) {
             frame[i] /= static_cast<double>(frame_size);
-            // std::cout << frame[i] << std::endl;
         }
 
         fftw_free(temp_fft);
-        free(fresp);
     }
 
 };
@@ -472,51 +508,38 @@ class GeometricAttenuation
 {
 public:
     GeometricAttenuation()
-    :sample_rate(0), max_delay(0), current_delay(nullptr), delayed_indexes(nullptr), indexes(nullptr)
+    :sample_rate(0), max_delay(0), current_delay(std::vector<double>()), delayed_indexes(std::vector<double>()), indexes(std::vector<double>())
     { }
 
     GeometricAttenuation(double fs, int channels)
     : sample_rate(fs)
     {
-        this->current_delay = (double*) malloc(sizeof(double) * channels);
-        memset(this->current_delay, 0, sizeof(double) * channels);
+        this->current_delay = std::vector<double>(channels, 0);
         this->max_delay = static_cast<size_t>(MAX_DELAY_SEC * this->sample_rate);
-        this->delayed_indexes = nullptr;
-        this->indexes = nullptr;
+        this->delayed_indexes = std::vector<double>();
+        this->indexes = std::vector<double>();
     }
 
-    ~GeometricAttenuation() {
-        if (this->current_delay) {
-            free(this->current_delay);
-            this->current_delay = nullptr;
-        }
-        free(this->indexes);
-        free(this->delayed_indexes);
+    ~GeometricAttenuation() = default;
+
+    void alloc_indexes(size_t length) {
+        this->indexes.resize(length);
+        std::iota(this->indexes.begin(), this->indexes.end(), 0);
+        this->delayed_indexes.resize(length);
     }
 
     void apply_fractional_delay(double* frame, double* frame_out, double distance, int channel, size_t frame_size) {
         double delay = distance * this->sample_rate / SOUND_SPEED;
         double delta_delay = delay - this->current_delay[channel];
-        if (delta_delay > SLEW_RATE) delta_delay = SLEW_RATE;
-        if (delta_delay < -SLEW_RATE) delta_delay = -SLEW_RATE;
+        delta_delay = std::max(-SLEW_RATE, std::min(SLEW_RATE, delta_delay));
         this->current_delay[channel] += delta_delay;
 
-        double* ind = (double*) realloc(this->indexes, sizeof(double) * frame_size);
-        double* d_indexes = (double*) realloc(this->delayed_indexes, sizeof(double) * frame_size);
-        if (!ind || !d_indexes) {
-            std::cerr << "[ERROR] Failed realloc in fractional delay" << std::endl;
-            return;
-        }
-
-        this->indexes = ind;
-        this->delayed_indexes = d_indexes;
-
         for (size_t i = 0; i < frame_size; ++i) {
-            this->indexes[i] = (int) i;
-            this->delayed_indexes[i] = (double) i - this->current_delay[channel];
+            this->indexes[i] = static_cast<double>(i);
+            this->delayed_indexes[i] = this->indexes[i] - this->current_delay[channel];
         }
 
-        lerp(this->indexes, frame, this->delayed_indexes, frame_out, frame_size, frame_size, true);
+        lerp(this->indexes.data(), frame, this->delayed_indexes.data(), frame_out, frame_size, frame_size, true);
     }
 
     double calculate_geometric_factor(double source_distance, double distance) {
@@ -527,9 +550,9 @@ public:
 private:
     double sample_rate;
     double max_delay;
-    double* current_delay;
-    double* delayed_indexes;
-    double* indexes;
+    std::vector<double> current_delay;
+    std::vector<double> delayed_indexes;
+    std::vector<double> indexes;
 };
 
 struct SpatialNeighs
@@ -542,7 +565,7 @@ struct SpatialNeighs
 
 SpatialNeighs spatial_match(CartesianPoint* target, HrirDatasetRead* dataset);
 void cross_fade(double* prev_kernel, double* current_kernel, size_t transition_length);
-void fft_convolve(double** buffer, double* x, double* kernel, size_t x_size, size_t k_size, ConvMode conv_mode);
+void fft_convolve(std::vector<double>* buffer, double* x, double* kernel, size_t x_size, size_t k_size, ConvMode conv_mode);
 
 struct Morphdata
 {
@@ -670,7 +693,6 @@ public:
         return this->cache->contains(k);
     }
 
-
 private:
     void remove(CacheNode* node) {
         CacheNode* prev = node->prev_node;
@@ -703,42 +725,38 @@ enum CurveMode
 
 struct RirFromDataset
 {
-    double* rir;
+    std::vector<double> rir;
     size_t lenght;
 
     RirFromDataset()
-    : rir(nullptr), lenght(0)
+    : rir(std::vector<double>()), lenght(0)
     { }
 
-    ~RirFromDataset() {
-        free(this->rir);
-    }
+    ~RirFromDataset() = default;
 };
 
 struct Rir
 {
-    double* rir;
+    std::vector<double> rir;
     size_t length;
 
     Rir()
-    : rir(nullptr), length(0)
+    : rir(std::vector<double>()), length(0)
     { }
 
     Rir(const Rir& r) {
-        this->rir = (double*) malloc(sizeof(double) * length);
-        memcpy(this->rir, r.rir, sizeof(double) * length);
+        this->rir.resize(r.length);
+        memcpy(this->rir.data(), r.rir.data(), sizeof(double) * r.length);
         this->length = r.length;
     }
 
     Rir(double* buffer, size_t channel_length) {
-        this->rir = (double*) malloc(sizeof(double) * channel_length);
-        memcpy(this->rir, buffer, sizeof(double) * channel_length);
+        this->rir.resize(channel_length);
+        memcpy(this->rir.data(), buffer, sizeof(double) * channel_length);
         this->length = channel_length;
     }
 
-    ~Rir() {
-        if (this->rir) free(this->rir);
-    }
+    ~Rir() = default;
 };
 
 
@@ -748,7 +766,6 @@ public:
     H5::H5File rdata;
     char** ir_keys;
 
-    RirDatasetRead() = default;
     RirDatasetRead(const char* dataset_path) {
         this->rdata = H5::H5File(dataset_path, H5F_ACC_RDONLY);
 
@@ -789,19 +806,112 @@ public:
         this->temp_rir = temp;
         r.read(this->temp_rir, H5::PredType::NATIVE_DOUBLE);
 
-        rir_buffer->rir = (double*) malloc(sizeof(double) * dim[0]);
+        rir_buffer->rir.resize(dim[0]);
         rir_buffer->lenght = dim[0];
-        memcpy(rir_buffer->rir, this->temp_rir, sizeof(double) * dim[0]);
+        memcpy(rir_buffer->rir.data(), this->temp_rir, sizeof(double) * dim[0]);
     }
 
     double get_sample_rate() {
-        return (double) this->sample_rate;
+        return static_cast<double>(this->sample_rate);
     }
 
 private:
     size_t data_length;
     int64_t sample_rate;
     double* temp_rir;
+};
+
+struct OSABuffer
+{
+    std::vector<double> buffer;
+    size_t conv_buffer_size;
+
+    OSABuffer()
+    : buffer(std::vector<double>()), conv_buffer_size(0)
+    { }
+
+    ~OSABuffer() { }
+};
+
+void apply_intermediate(OSABuffer* osa_buffer, double* x, std::vector<double> prev_kernel, std::vector<double> curr_kernel, size_t x_length, size_t prev_kernel_length, size_t curr_kernel_length, size_t transition_length);
+void intermediate_segment(double* buffer, double* x, double* prev_kernel, double* curr_kernel, size_t ksize, size_t transition_size);
+
+class OSAConv
+{
+public:
+    OSAConv(size_t chunk_size)
+    : buffer_size(chunk_size)
+    {
+        this->init_buffer_size = MAX_OSA_BUFFER_SIZE;
+        this->buffer = std::vector<double>(this->init_buffer_size, 0.0);
+        this->transition_size = this->buffer_size < 1024 ? static_cast<size_t>(this->buffer_size * OSA_TRANSITION_FACTOR) : MAX_TRANSITION_SAMPLES;
+        this->prev_kernel = std::vector<double>();
+        this->prev_kernel_size = 0;
+    }
+
+    ~OSAConv() = default;
+
+    void process(double* buffer_out, double* x, std::vector<double> kernel, size_t kernel_size) {
+
+        OSABuffer b;
+        apply_intermediate(&b, x, this->prev_kernel, kernel, this->buffer_size, this->prev_kernel_size, kernel_size, this->transition_size);
+
+        this->prev_kernel = kernel;
+        this->prev_kernel_size = kernel_size;
+
+        for (size_t i = 0; i < this->buffer_size; ++i) {
+            b.buffer[i] += this->buffer[i];
+        }
+
+        size_t shift_size = this->init_buffer_size - this->buffer_size;
+        memmove(this->buffer.data(), this->buffer.data() + this->buffer_size, sizeof(double) * shift_size);
+        memset(this->buffer.data() + shift_size, 0, sizeof(double) * this->buffer_size);
+
+        memcpy(buffer_out, b.buffer.data(), sizeof(double) * this->buffer_size); // frame out buffer
+
+        int tail_size = static_cast<int>(b.conv_buffer_size) - static_cast<int>(this->buffer_size);
+        if (tail_size > 0) {
+            if (static_cast<double>(tail_size) > this->init_buffer_size) {
+                std::vector<double> temp_internal_buffer(tail_size, 0.0);
+                memcpy(temp_internal_buffer.data(), this->buffer.data(), sizeof(double) * this->init_buffer_size);
+                this->buffer = temp_internal_buffer;
+                this->init_buffer_size = tail_size;
+            }
+            for (int i = 0; i < tail_size; ++i) {
+                this->buffer[i] += b.buffer[i + this->buffer_size];
+            }
+        }
+    }
+
+private:
+    size_t init_buffer_size;
+    size_t buffer_size;
+    size_t transition_size;
+    std::vector<double> buffer;
+    std::vector<double> prev_kernel;
+    size_t prev_kernel_size;
+};
+
+struct HybriOuts
+{
+    std::vector<double> left_channel;
+    std::vector<double> right_channel;
+    size_t buffer_size;
+
+    HybriOuts()
+    : left_channel(std::vector<double>()), right_channel(std::vector<double>()), buffer_size(0)
+    { }
+
+    ~HybriOuts() { }
+
+    std::vector<float> get_float_interleaved() {
+        std::vector<float> interleaved(this->buffer_size * 2);
+        for (size_t i = 0; i < this->buffer_size; ++i) {
+            interleaved[i * 2] = static_cast<float>(this->left_channel[i]);
+            interleaved[i * 2 + 1] = static_cast<float>(this->right_channel[i]);
+        }
+        return interleaved;
+    }
 };
 
 #endif

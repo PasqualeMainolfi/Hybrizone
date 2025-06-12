@@ -230,6 +230,7 @@ class HRIRBuilder():
     
     def __distance_based_hrir(self, hrir: NDArray[np.float64], rho: float) -> NDArray[np.float64]:
         factor = self.geometric_attenuation.calculate_geometric_attenuation(source_distance=self.source_distance, distance=rho)
+        factor = factor if factor <= 1.0 else 1.0
         
         if factor < 1.0:
             with ThreadPoolExecutor(max_workers=2) as delayer:
@@ -287,7 +288,7 @@ class HRIRBuilder():
             azim, elev = coord
             # print(f"[DEBUG] phi: {elev} | theta: {azim}")
                 
-            key = f"{int(elev)}:{int(azim)}"
+            key = f"{int(elev)}_{int(azim)}"
             hinfo.hrirs[i, :, :] = self.dataset.get_hrir(key=key)[:]
             hinfo.hrtfs.append(self.dataset.get_hrtf(key=key))
             hinfo.itds[i] = self.dataset.get_itd(key=key)
@@ -323,20 +324,18 @@ class HRIRBuilder():
         
         interpolated = self.__interpolated_hrir(hrirs_info=hrirs_info, method=method, mode=self.interp_domain)
         dhrir_ = self.__distance_based_hrir(hrir=interpolated.hrir, rho=hrirs_info.target.rho) 
+        dhrir = dhrir_
         
         if self.__prev_distance is not None and self.__prev_distance != hrirs_info.target.rho:
             d = abs(hrirs_info.target.rho - self.__prev_distance)
             if d > MAX_DISTANCE_TRANSITION:
                 tlength = int(INTERNAL_KERNEL_TRANSITION * self.fs)
                 dhrir = cross_fade(k1=self.__prev_dist_hrir, k2=dhrir_, tlength=tlength)
-            else:
-                dhrir = dhrir_
-        else:
-            dhrir = dhrir_
             
-        interpolated.hrir = dhrir
         self.__prev_dist_hrir = dhrir_
         self.__prev_distance = hrirs_info.target.rho
         point_hash = hrirs_info.target._get_hash()
+        interpolated.hrir = dhrir_
         self.__cache_hrir_builded.put(key=point_hash, value=interpolated)
+        interpolated.hrir = dhrir
         return interpolated

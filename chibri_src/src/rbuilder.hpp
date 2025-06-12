@@ -11,6 +11,7 @@
 #include <format>
 #include <iostream>
 #include <string>
+#include <vector>
 
 class RBuilder
 {
@@ -29,12 +30,11 @@ public:
         this->fs = sample_rate;
         this->cache = new LRUCache(CACHE_CAPACITY, CacheType::RIR);
         this->current_cache_key = "";
-        this->prev_distance = (double*) malloc(sizeof(double));
-        *this->prev_distance = -1.0;
-        this->prev_distance_rir = nullptr;
+        this->prev_distance = -1.0;
+        this->prev_distance_rir = std::vector<double>();
 
         this->geometric_attenuation = new GeometricAttenuation(this->fs, 1);
-        this->db_attenuation = nullptr;
+        this->db_attenuation = std::vector<double>();
         this->iso9613 = nullptr;
     }
 
@@ -43,15 +43,12 @@ public:
         delete this->cache;
         delete this->iso9613;
         delete this->geometric_attenuation;
-        free(this->prev_distance);
-        free(this->prev_distance_rir);
-        free(this->db_attenuation);
     }
 
     void set_air_condition(AirData* air_data) {
         this->iso9613 = new ISO9613Filter(air_data, this->fs);
-        this->db_attenuation = (double*) malloc(sizeof(double) * NFREQS);
-        this->iso9613->get_attenuation_air_absorption(this->db_attenuation);
+        this->db_attenuation.resize(NFREQS);
+        this->iso9613->get_attenuation_air_absorption(this->db_attenuation.data());
     }
 
     void set_rirs(size_t index_a, size_t index_b, double smooth_factor) {
@@ -67,19 +64,15 @@ public:
             // std::cout << rir_size << " : " << rir_a.lenght << " : " << rir_b.lenght << std::endl;
 
             if (rir_a.lenght < rir_b.lenght) {
-                double* temp = (double*) malloc(sizeof(double) * rir_b.lenght);
-                memset(temp, 0, sizeof(double) * rir_b.lenght);
-                memcpy(temp, rir_a.rir, sizeof(double) * rir_a.lenght);
-                free(rir_a.rir);
+                std::vector<double> temp(rir_b.lenght, 0.0);
+                memcpy(temp.data(), rir_a.rir.data(), sizeof(double) * rir_a.lenght);
                 rir_a.rir = temp;
                 rir_a.lenght = rir_b.lenght;
             }
 
             if (rir_a.lenght > rir_b.lenght) {
-                double* temp = (double*) malloc(sizeof(double) * rir_a.lenght);
-                memset(temp, 0, sizeof(double) * rir_a.lenght);
-                memcpy(temp, rir_b.rir, sizeof(double) * rir_b.lenght);
-                free(rir_b.rir);
+                std::vector<double> temp(rir_a.lenght, 0.0);
+                memcpy(temp.data(), rir_b.rir.data(), sizeof(double) * rir_b.lenght);
                 rir_b.rir = temp;
                 rir_b.lenght = rir_a.lenght;
             }
@@ -94,14 +87,14 @@ public:
             md.lenght = rir_size;
             md.fftw_length = fftw_size;
 
-            this->get_fft(rir_a.rir, md.source_a, rir_size);
-            this->get_fft(rir_b.rir, md.source_b, rir_size);
+            this->get_fft(rir_a.rir.data(), md.source_a, rir_size);
+            this->get_fft(rir_b.rir.data(), md.source_b, rir_size);
 
-            double* scep = nullptr;
-            this->get_spectral_envelope(md.source_a, &scep, rir_size, fftw_size, smooth_factor);
+            std::vector<double> scep(fftw_size, 0.0);
+            this->get_spectral_envelope(md.source_a, scep.data(), rir_size, fftw_size, smooth_factor);
 
-            double* tcep = nullptr;
-            this->get_spectral_envelope(md.source_b, &tcep, rir_size, fftw_size, smooth_factor);
+            std::vector<double> tcep(fftw_size, 0.0);
+            this->get_spectral_envelope(md.source_b, tcep.data(), rir_size, fftw_size, smooth_factor);
 
             for (size_t i = 0; i < fftw_size; ++i) {
                 std::complex<double> target_flatten(md.source_b[i][0], md.source_b[i][1]);
@@ -109,9 +102,6 @@ public:
                 md.morphed[i][0] = target_flatten.real();
                 md.morphed[i][1] = target_flatten.imag();
             }
-
-            free(scep);
-            free(tcep);
 
             this->cache->put(this->current_cache_key, (Morphdata*) new Morphdata(md));
         }
@@ -130,65 +120,65 @@ public:
         double cx = 1.0 - std::abs(1.0 - 2.0 * factor);
         double dx = std::max(2.0 * factor - 1.0, 0.0);
 
-        fftw_complex* y_spectrum = (fftw_complex*) malloc(sizeof(fftw_complex) * md->fftw_length);
+        fftw_complex* y_spectrum = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * md->fftw_length);
         for (size_t i = 0; i < md->fftw_length; ++i) {
             y_spectrum[i][0] = sx * md->source_a[i][0] + cx * md->morphed[i][0] + dx * md->source_b[i][0];
             y_spectrum[i][1] = sx * md->source_a[i][1] + cx * md->morphed[i][1] + dx * md->source_b[i][1];
         }
 
-        double* temp_morphed = (double*) malloc(sizeof(double) * md->lenght);
-
-        fftw_plan p = fftw_plan_dft_c2r_1d(md->lenght, y_spectrum, temp_morphed, FFTW_MEASURE);
+        std::vector<double> temp_morphed(md->lenght, 0.0);
+        fftw_plan p = fftw_plan_dft_c2r_1d(md->lenght, y_spectrum, temp_morphed.data(), FFTW_MEASURE);
 
         fftw_execute(p);
         fftw_destroy_plan(p);
         fftw_free(y_spectrum);
 
-        for (size_t i = 0; i < md->lenght; ++i) {
-            temp_morphed[i] /= (double) md->lenght;
-        }
+        auto max_morphed_it = std::max_element(
+            temp_morphed.begin(), temp_morphed.end(), [](double a, double b) {
+                return std::abs(a) < std::abs(b);
+            }
+        );
 
-        this->apply_distance(temp_morphed, distance, md->lenght);
+        double max_morphed = *max_morphed_it;
+        std::transform(
+            temp_morphed.begin(), temp_morphed.end(), temp_morphed.begin(), [max_morphed](double x) {
+                return x / max_morphed;
+            }
+        );
 
-        double* current_temp = (double*) malloc(sizeof(double) * md->lenght);
-        memcpy(current_temp, temp_morphed, sizeof(double) * md->lenght);
+        this->apply_distance(temp_morphed.data(), distance, md->lenght);
+        std::vector<double> current_temp = temp_morphed;
 
-        if (*this->prev_distance != -1.0) {
-            double d = std::abs(distance - *this->prev_distance);
+        if (this->prev_distance != -1.0 && this->prev_distance != distance) {
+            double d = std::abs(distance - this->prev_distance);
             if (d > MAX_CROSSFADE_DISTANCE) {
                 double tlength = (size_t) (INTERNAL_KERNEL_TRANSITION * this->fs);
-                cross_fade(this->prev_distance_rir, temp_morphed, tlength);
+                cross_fade(this->prev_distance_rir.data(), current_temp.data(), tlength);
             }
         }
 
-        *this->prev_distance = distance;
-        double* prev_temp = (double*) realloc(this->prev_distance_rir, sizeof(double) * md->lenght);
-        this->prev_distance_rir = prev_temp;
+        this->prev_distance = distance;
+        this->prev_distance_rir = temp_morphed;
 
-        memcpy(this->prev_distance_rir, current_temp, md->lenght);
-
-        rir->rir = (double*) malloc(sizeof(double) * md->lenght);
-        memcpy(rir->rir, temp_morphed, sizeof(double) * md->lenght);
+        rir->rir.resize(md->lenght);
+        memcpy(rir->rir.data(), current_temp.data(), sizeof(double) * md->lenght);
         rir->length = md->lenght;
-
-        free(temp_morphed);
-        free(current_temp);
     }
 
 private:
     LRUCache* cache;
     std::string current_cache_key;
-    double* prev_distance;
-    double* prev_distance_rir;
+    double prev_distance;
+    std::vector<double> prev_distance_rir;
     double fs;
     ISO9613Filter* iso9613;
-    double* db_attenuation;
+    std::vector<double> db_attenuation;
     GeometricAttenuation* geometric_attenuation;
     double source_distance;
 
-    void get_spectral_envelope(fftw_complex* x, double** y, size_t frame_size, size_t fft_size, double smooth_factor) {
+    void get_spectral_envelope(fftw_complex* x, double* y, size_t frame_size, size_t fft_size, double smooth_factor) {
         fftw_complex* db = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * fft_size);
-        double mag_max = -1e9;
+        double mag_max = std::abs(std::complex<double>(x[0][0], x[0][1]));
         for (size_t i = 0; i < fft_size; ++i) {
             std::complex<double> z(x[i][0], x[i][1]);
             double mag = std::abs(z);
@@ -197,26 +187,23 @@ private:
             db[i][1] = 0.0;
         }
 
-
-        double* rc = (double*) malloc(sizeof(double) * frame_size);
-        fftw_plan ifft = fftw_plan_dft_c2r_1d(frame_size, db, rc, FFTW_MEASURE);
+        std::vector<double> rc(frame_size, 0.0);
+        fftw_plan ifft = fftw_plan_dft_c2r_1d(frame_size, db, rc.data(), FFTW_ESTIMATE);
         fftw_execute(ifft);
         fftw_destroy_plan(ifft);
-        fftw_free(db);
 
         std::transform(
-            rc, rc + frame_size, rc, [&frame_size](double x) {
-                return x / (double) frame_size;
+            rc.begin(), rc.end(), rc.begin(), [&frame_size](double x) {
+                return x / static_cast<double>(frame_size);
             }
         );
 
         fftw_complex* realcep = (fftw_complex*) malloc(sizeof(fftw_complex) * fft_size);
-        fftw_plan fft = fftw_plan_dft_r2c_1d(frame_size, rc, realcep, FFTW_MEASURE);
+        fftw_plan fft = fftw_plan_dft_r2c_1d(frame_size, rc.data(), realcep, FFTW_ESTIMATE);
         fftw_execute(fft);
         fftw_destroy_plan(fft);
-        free(rc);
 
-        double* realcep_real = (double*) malloc(sizeof(double) * fft_size);
+        std::vector<double> realcep_real(fft_size);
         double rc_mean = 0.0;
         for (size_t i = 0; i < fft_size; ++i) {
             double re = realcep[i][0];
@@ -224,7 +211,7 @@ private:
             rc_mean += re;
         }
 
-        rc_mean /= (double) fft_size;
+        rc_mean /= static_cast<double>(fft_size);
 
         for (size_t i = 0; i < fft_size; ++i) {
             double value = realcep_real[i];
@@ -233,33 +220,30 @@ private:
 
         fftw_free(realcep);
 
-        size_t kernel_length = (size_t) (fft_size * smooth_factor);
-        double* smooth_kernel = (double*) malloc(sizeof(double) * kernel_length);
+        size_t kernel_length = static_cast<size_t>(fft_size * smooth_factor);
+        std::vector<double> smooth_kernel(kernel_length, 1.0);
         for (size_t i = 0; i < kernel_length; ++i) {
-            smooth_kernel[i] = 1.0 / ((double) kernel_length - 1.0);
+            smooth_kernel[i] /= static_cast<double>(kernel_length);
         }
 
-        double* rc_smoothed = nullptr;
-        fft_convolve(&rc_smoothed, realcep_real, smooth_kernel, fft_size, kernel_length, ConvMode::SAME);
+        std::vector<double> rc_smoothed;
+        fft_convolve(&rc_smoothed, realcep_real.data(), smooth_kernel.data(), fft_size, kernel_length, ConvMode::SAME);
 
-        free(realcep_real);
-        free(smooth_kernel);
+        auto max_smooth_it = std::max_element(
+            rc_smoothed.begin(), rc_smoothed.end(), [](double a, double b) {
+                return std::abs(a) < std::abs(b);
+            }
+        );
 
-        double max_rc = -1e9;
-        for (size_t i = 0; i < fft_size; ++i) {
-            max_rc = std::max(max_rc, rc_smoothed[i]);
-        }
-
+        double max_rc = *max_smooth_it;
         double scale_factor = mag_max / (max_rc + 1e-12);
         std::transform(
-            rc_smoothed, rc_smoothed + fft_size, rc_smoothed, [&scale_factor](double x) {
+            rc_smoothed.begin(), rc_smoothed.begin() + fft_size, rc_smoothed.begin(), [&scale_factor](double x) {
                 return x * scale_factor;
             }
         );
 
-        *y = (double*) malloc(sizeof(double) * fft_size);
-        memcpy(*y, rc_smoothed, sizeof(double) * fft_size);
-        free(rc_smoothed);
+        memcpy(y, rc_smoothed.data(), sizeof(double) * fft_size);
     }
 
     double non_linear_morph_curve(double direction, CurveMode curve_mode) {
@@ -283,8 +267,9 @@ private:
 
     void apply_distance(double* x, double distance, size_t frame_length) {
         double factor = this->geometric_attenuation->calculate_geometric_factor(this->source_distance, distance);
+        factor = factor > 1.0 ? 1.0 : factor;
         double d = distance - std::max(this->source_distance, ETA);
-        this->iso9613->air_absorption_filter(x, this->db_attenuation, d, frame_length);
+        this->iso9613->air_absorption_filter(x, this->db_attenuation.data(), d, frame_length);
         std::transform(
             x, x + frame_length, x, [&factor](double x) {
                 return x * factor;
@@ -293,11 +278,10 @@ private:
     }
 
     void get_fft(double* x, fftw_complex* y, size_t length) {
-        fftw_plan p = fftw_plan_dft_r2c_1d(length, x, y, FFTW_MEASURE);
+        fftw_plan p = fftw_plan_dft_r2c_1d(length, x, y, FFTW_ESTIMATE);
         fftw_execute(p);
         fftw_destroy_plan(p);
     }
-
 };
 
 #endif

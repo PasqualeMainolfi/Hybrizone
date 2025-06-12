@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <vector>
 
 void lerp(double* x, double* y, double* xnew, double* yout, size_t xsize, size_t xnew_size, bool fill_value) {
     for (size_t i = 0; i < xnew_size; ++i) {
@@ -24,9 +25,9 @@ void lerp(double* x, double* y, double* xnew, double* yout, size_t xsize, size_t
         auto it = std::lower_bound(x, x + xsize, value);
         size_t idx = it - x;
 
-        if (x[idx] == value || idx == 0) {
+        if (idx < xsize && x[idx] == value) {
             yout[i] = y[idx];
-        } else {
+        } else if (idx > 0 && idx < xsize) {
             double x0 = x[idx - 1];
             double x1 = x[idx];
             double y0 = y[idx -1];
@@ -34,7 +35,8 @@ void lerp(double* x, double* y, double* xnew, double* yout, size_t xsize, size_t
 
             double t = (value - x0) / (x1 - x0);
             yout[i] = y0 + (y1 - y0) * t;
-            // std::cout << yout[i] << std::endl;
+        } else {
+            yout[i] = fill_value ? 0.0 : (idx == 0 ? y[0] : y[xsize - 1]);
         }
     }
 }
@@ -82,23 +84,22 @@ void cross_fade(double* prev_kernel, double* current_kernel, size_t transition_l
     }
 };
 
-void fft_convolve(double** buffer, double* x, double* kernel, size_t x_size, size_t k_size, ConvMode conv_mode) {
-    size_t conv_size = x_size + k_size - 1;
-    double* x_padded = (double*) malloc(sizeof(double) * conv_size);
-    double* k_padded = (double*) malloc(sizeof(double) * conv_size);
-    memset(x_padded, 0, sizeof(double) * conv_size);
-    memset(k_padded, 0, sizeof(double) * conv_size);
+void fft_convolve(std::vector<double>* buffer, double* x, double* kernel, size_t x_size, size_t k_size, ConvMode conv_mode) {
+    size_t conv_size_temp = x_size + k_size - 1;
+    size_t conv_size = next_power_of_two(conv_size_temp);
+    std::vector<double> x_padded(conv_size, 0.0);
+    std::vector<double> k_padded(conv_size, 0.0);
 
-    memcpy(x_padded, x, sizeof(double) * x_size);
-    memcpy(k_padded, kernel, sizeof(double) * k_size);
+    memcpy(x_padded.data(), x, sizeof(double) * x_size);
+    memcpy(k_padded.data(), kernel, sizeof(double) * k_size);
 
     size_t half_size = conv_size / 2 + 1;
     fftw_complex* xfft = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * half_size);
     fftw_complex* kfft = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * half_size);
 
-    fftw_plan px = fftw_plan_dft_r2c_1d(conv_size, x_padded, xfft, FFTW_MEASURE);
+    fftw_plan px = fftw_plan_dft_r2c_1d(conv_size, x_padded.data(), xfft, FFTW_ESTIMATE);
     fftw_execute(px);
-    fftw_plan pk = fftw_plan_dft_r2c_1d(conv_size, k_padded, kfft, FFTW_MEASURE);
+    fftw_plan pk = fftw_plan_dft_r2c_1d(conv_size, k_padded.data(), kfft, FFTW_ESTIMATE);
     fftw_execute(pk);
 
     fftw_complex* ifft_in = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * half_size);
@@ -111,24 +112,24 @@ void fft_convolve(double** buffer, double* x, double* kernel, size_t x_size, siz
     }
 
     double* ifft_out = (double*) malloc(sizeof(double) * conv_size);
-    fftw_plan pifft = fftw_plan_dft_c2r_1d(conv_size, ifft_in, ifft_out, FFTW_MEASURE);
+    fftw_plan pifft = fftw_plan_dft_c2r_1d(conv_size, ifft_in, ifft_out, FFTW_ESTIMATE);
     fftw_execute(pifft);
+
+    std::transform(
+        ifft_out, ifft_out + conv_size, ifft_out, [&conv_size](double x) {
+            return x / static_cast<double>(conv_size);
+        }
+    );
 
     size_t length = conv_size;
     size_t offset = 0;
     if (conv_mode == ConvMode::SAME) {
-        length = x_size >= k_size ? x_size : k_size;
-        offset = (conv_size - length) / 2;
+        length = x_size;
+        offset = (conv_size_temp - x_size) / 2;
     }
 
-    // std::transform(
-    //     ifft_out, ifft_out + conv_size, ifft_out, [&conv_size](double x) {
-    //         return x / (double) conv_size;
-    //     }
-    // );
-
-    *buffer = (double*) malloc(sizeof(double) * length);
-    memcpy(*buffer, ifft_out + offset, sizeof(double) * length);
+    buffer->resize(length);
+    memcpy(buffer->data(), ifft_out + offset, sizeof(double) * length);
 
     fftw_destroy_plan(px);
     fftw_destroy_plan(pk);
@@ -136,8 +137,44 @@ void fft_convolve(double** buffer, double* x, double* kernel, size_t x_size, siz
     fftw_free(xfft);
     fftw_free(kfft);
     fftw_free(ifft_in);
-    free(x_padded);
-    free(k_padded);
     free(ifft_out);
+}
 
+void intermediate_segment(double* buffer, double* x, double* prev_kernel, double* curr_kernel, size_t ksize, size_t transition_size) {
+    for (size_t i = 0; i < transition_size; ++i) {
+        double alpha = static_cast<double>(i) / static_cast<double>(transition_size - 1);
+        for (size_t j = 0; j < ksize; ++j) {
+            double crossed = (1.0 - alpha) * prev_kernel[j] + alpha * curr_kernel[j];
+            buffer[i + j] += x[i] * crossed;
+        }
+    }
+}
+
+void apply_intermediate(OSABuffer* osa_buffer, double* x, std::vector<double> prev_kernel, std::vector<double> curr_kernel, size_t x_length, size_t prev_kernel_length, size_t curr_kernel_length, size_t transition_length) {
+    if (prev_kernel_length <= 0) {
+        fft_convolve(&osa_buffer->buffer, x, curr_kernel.data(), x_length, curr_kernel_length, ConvMode::FULL);
+        osa_buffer->conv_buffer_size = x_length + curr_kernel_length - 1;
+        return;
+    }
+
+    std::vector<double> kprev = prev_kernel;
+    std::vector<double> kcurr = curr_kernel;
+
+    size_t ksize = std::max(prev_kernel_length, curr_kernel_length);
+    size_t conv_length = x_length + ksize - 1;
+    osa_buffer->buffer.resize(conv_length);
+    osa_buffer->conv_buffer_size = conv_length;
+    intermediate_segment(osa_buffer->buffer.data(), x, kprev.data(), kcurr.data(), ksize, transition_length);
+
+    size_t x_rest_size = x_length - transition_length;
+    std::vector<double> xtemp(x_rest_size, 0.0);
+    memcpy(xtemp.data(), x + transition_length, sizeof(double) * x_rest_size);
+
+    std::vector<double> rest_part;
+    fft_convolve(&rest_part, xtemp.data(), kcurr.data(), x_rest_size, ksize, ConvMode::FULL);
+
+    size_t x_rest_conv_size = x_rest_size + ksize - 1;
+    for (size_t i = 0; i < x_rest_conv_size; ++i) {
+        osa_buffer->buffer[i + transition_length] += rest_part[i];
+    }
 }

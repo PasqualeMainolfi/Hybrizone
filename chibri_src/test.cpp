@@ -1,91 +1,115 @@
-// #include "src/htools.hpp"
-// #include "src/hbuilder.hpp"
-#include "src/hybri.hpp"
 #include "src/htools.hpp"
 #include "src/hybri.hpp"
-// #include "src/rbuilder.hpp"
 #include <cstddef>
-// #include <chrono>
-// #include <ratio>
+#include <cstdlib>
+#include <portaudio.h>
+#include <sndfile.hh>
+#include <vector>
+#include <chrono>
 
 #define HRIR_DATASET_PATH ("/Users/pm/AcaHub/Coding/BinauralSpatial/data/HRIR-KEMAR_DATASET.h5")
 #define RIR_DATASET_PATH ("/Users/pm/AcaHub/Coding/BinauralSpatial/data/RIR-MIT_SURVEY.h5")
+#define AUDIO_FILE ("/Users/pm/AcaHub/AudioSamples/suzanne_mono.wav")
 #define FS (44100.0)
 #define CHUNK (2048)
 
+#define CHECK_PORTAUDIO(err) \
+    do { \
+        if ((err) != paNoError) { \
+            std::cerr << "[ERROR] Portaudio error: " << Pa_GetErrorText(err) << std::endl; \
+            std::exit(1); \
+        } \
+    } while (0) \
+
 int main(void) {
-    // HRIR dataset test
-    // HrirDatasetRead hrir(HRIR_DATASET_PATH);
 
-    // double* temp_hrir = nullptr;
-    // hrir.get_hrir_data(&temp_hrir, "10:90", HDataType::HANGLE);
-    // std::cout << temp_hrir << std::endl;
-    // free(temp_hrir);
+    SF_INFO sfinfo;
+    sfinfo.format = 0;
+    SNDFILE* audio_file_in = sf_open(AUDIO_FILE, SFM_READ, &sfinfo);
 
-    // CartesianPoint c = hrir.get_cartesian_reference(10);
-    // std::cout << "CARTESIAN REFERENCE: " << c.x << " : " << c.y << " : " << c.z << std::endl;
+    PaError perr;
+    const PaDeviceInfo* info;
+    PaStreamParameters output_params;
 
-    // PolarIndex  p = hrir.get_polar_index(10);
-    // std::cout << "POLAR REFERENCE: " << p.ele << " : " << p.azi << std::endl;
+    perr = Pa_Initialize();
+    CHECK_PORTAUDIO(perr);
 
-    // double source_distance = hrir.get_source_distance();
-    // std::cout << "SOURCE DISTANCE: " << source_distance << std::endl;
+    output_params.device = Pa_GetDefaultOutputDevice();
+    info = Pa_GetDeviceInfo(output_params.device);
 
-    // double fs = hrir.get_sample_rate();
-    // std::cout << "FS: " << fs << std::endl;
+    output_params.channelCount = 2;
+    output_params.sampleFormat = paFloat32;
+    output_params.suggestedLatency = info->defaultHighOutputLatency;
+    output_params.hostApiSpecificStreamInfo = NULL;
 
-    // HShape shape = hrir.get_shape();
-    // std::cout << "SHAPE: " << shape.rows << " : " << shape.cols << std::endl;
-
-    // HBUILDER test
+    PaStream* stream;
+    perr = Pa_OpenStream(&stream, nullptr, &output_params, (double) FS, CHUNK, paClipOff, nullptr, nullptr);
+    CHECK_PORTAUDIO(perr);
+    perr = Pa_StartStream(stream);
+    CHECK_PORTAUDIO(perr);
 
     AirData air_data;
-    std::cout << air_data.kelvin << std::endl;
-
-    // HBuilder hb(HRIR_DATASET_PATH);
-    // hb.set_air_condition(&air_data);
-
-    // Hrir* kernel = new Hrir();
-    // double azi = 0.0;
-    // while (azi < 360.0) {
-    //     auto start = std::chrono::high_resolution_clock::now();
-    //     PolarPoint target(3.0, 10.7, azi, AngleMode::DEGREE);
-
-    //     hb.hmatching(&target);
-
-    //     hb.build_kernel(kernel);
-
-    //     // std::cout << kernel->left_channel<< std::endl;
-    //     auto end = std::chrono::high_resolution_clock::now();
-    //     std::chrono::duration<double, std::milli> elapsed = end - start;
-    //     std::cout << "[INFO] TIME: " << elapsed << std::endl;
-    //     azi += 0.1;
-    // }
-
-    // delete kernel;
-
     Hybrizone hybri(HRIR_DATASET_PATH, RIR_DATASET_PATH, CHUNK, FS);
     hybri.set_air_condition(air_data);
-    hybri.set_rirs(10, 100, 0.1);
+    hybri.set_rirs(10, 30, 0.1);
 
-    PolarPoint target(3.0, 10.7, 90.0, AngleMode::DEGREE);
-    hybri.set_target_position(target);
+    double azi = 0.0;
+    double rho = 0.0;
+    double rho_step = 1.0;
+    bool rho_flag = false;
+    double max_distance = 30.0;
+    while (true) {
 
-    hybri.set_hybrid_rir_params(0.37, CurveMode::SIGMOID);
+        std::vector<double> frame(CHUNK);
+        sf_count_t fcount = sf_read_double(audio_file_in, frame.data(), CHUNK);
+        if (fcount <= 0) break;
 
-    Kernels kernels;
-    hybri.generate_kernels(&kernels);
+        // process time start
+        auto start_time = std::chrono::high_resolution_clock::now();
 
+        PolarPoint target(rho, 0.0, azi, AngleMode::DEGREE);
+        hybri.set_target_position(target);
 
-    // RBuilder rb(RIR_DATASET_PATH, 1.7, FS);
-    // rb.set_air_condition(&air_data);
-    // rb.set_rirs(10, 100, 0.1);
+        if (rho > max_distance) rho_flag = true;
+        if (rho < rho_step) rho_flag = false;
+        rho = rho_flag ? rho - rho_step : rho + rho_step;
+        azi = azi >= 360.0 ? 0.0 : azi + 25.0;
 
-    // Rir rir;
-    // rb.build_hybrid_rir(&rir, 0.37, CurveMode::SIGMOID, 1.7);
+        hybri.set_hybrid_rir_params(0.37, CurveMode::SIGMOID);
 
+        Kernels kernels;
+        hybri.generate_kernels(&kernels);
 
+        // generate kernels time
+        auto time_to_generate_kernels = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double> t_kernels = time_to_generate_kernels - start_time;
 
+        HybriOuts channels;
+        hybri.process_frame(&channels, frame.data(), &kernels);
+
+        // time to convolve
+        auto time_to_convolve = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double> t_convolve = time_to_convolve - start_time;
+
+        std::vector<float> interleaved = channels.get_float_interleaved();
+        Pa_WriteStream(stream, interleaved.data(), CHUNK);
+
+        // total time
+        auto total_time = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double> t_time = total_time - start_time;
+
+    #ifdef DEBUG
+        // get times
+        std::cerr << "[INFO PROCESS TIME]" << std::endl;
+        std::cerr << "Time to generate kernels: " << t_kernels.count() <<  std::endl;
+        std::cerr << "Time to convolve frame and kernels: " << t_convolve.count() << std::endl;
+        std::cerr << "Total time: " << t_time.count() << std::endl;
+    #endif
+    }
+
+    Pa_StopStream(stream);
+    Pa_CloseStream(stream);
+    Pa_Terminate();
 
     return 0;
 }

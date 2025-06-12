@@ -30,8 +30,7 @@ def get_morphed_data(curve_value: float, source1: NDArray[np.complex64], source2
     sx = max(1.0 - 2.0 * curve_value, 0.0)  
     cx = 1.0 - abs(1.0 - 2.0 * curve_value)
     dx = max(2.0 * curve_value - 1.0, 0.0)
-    yspectrum = (sx * source1 + cx * morphed + dx * source2) * 0.5
-    return yspectrum
+    return sx * source1 + cx * morphed + dx * source2
 
 class RIRMorpha():
     def __init__(self, rir_database_path: str, source_distance: float):
@@ -143,7 +142,6 @@ class RIRMorpha():
         
         kernel_length = int(len(realcp) * smooth_factor)
         kernel = np.ones(kernel_length) / kernel_length
-        # rc_smoothed = np.convolve(realcp, kernel, mode="same")
         rc_smoothed = scipy.signal.fftconvolve(realcp, kernel, mode="same")
         
         scale_factor = np.max(mag) / (np.max(rc_smoothed) + 1e-12)
@@ -165,6 +163,7 @@ class RIRMorpha():
     
     def __distance_based_rir(self, rir: NDArray[np.float64], rho: float) -> NDArray[np.float64]:
         factor = self.geometric_attenuation.calculate_geometric_attenuation(source_distance=self.source_distance, distance=rho)
+        factor = factor if factor <= 1.0 else 1.0
         filtered = self.iso9613.air_absorption_filter(frame=rir, alpha_absortion=self.db_attenuation, distance=rho - max(self.source_distance, ETA)) * factor
         return filtered
     
@@ -194,21 +193,17 @@ class RIRMorpha():
         y = np.fft.irfft(yspectrum)
         y /= np.max(np.abs(y) + 1e-12)
         y_dist = self.__distance_based_rir(rir=y, rho=distance)
+        y_out = y_dist
         
-        y = None
         if self.__prev_dist is not None:
             d = abs(distance - self.__prev_dist)
             if d > MAX_DISTANCE_TRANSITION:
                 tlength = int(INTERNAL_KERNEL_TRANSITION * self.fs)
-                y = cross_fade(k1=self.__prev_dist_rir, k2=y_dist, tlength=tlength)
-            else:
-                y = y_dist
-        else: 
-            y = y_dist
+                y_out = cross_fade(k1=self.__prev_dist_rir, k2=y_dist, tlength=tlength)
             
         self.__prev_dist = distance
         self.__prev_dist_rir = y_dist
-        return y
+        return y_out
         
     def _get_data_plot(self, rir: NDArray[np.float32]) -> PlotData:
         n = len(rir)

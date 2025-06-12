@@ -3,7 +3,13 @@
  -lhdf5
  -lhdf5_cpp
  -lfftw3
+ -lportaudio
+ -lsndfile
  -I/opt/homebrew/opt/hdf5/include
  -L/opt/homebrew/opt/hdf5/lib
  -I/opt/homebrew/opt/fftw/include
  -L/opt/homebrew/opt/fftw/lib
+ -I/opt/homebrew/opt/portaudio/include
+ -L/opt/homebrew/opt/portaudio/lib
+ -I/opt/homebrew/opt/libsndfile/include
+ -L/opt/homebrew/opt/libsndfile/lib
