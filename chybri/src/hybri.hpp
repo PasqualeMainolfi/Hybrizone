@@ -4,13 +4,11 @@
 #include "hbuilder.hpp"
 #include "htools.hpp"
 #include "rbuilder.hpp"
-#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
 #include <vector>
-
 
 struct Kernels
 {
@@ -125,19 +123,12 @@ public:
         this->hleft_buffer->process(out_channels->left_channel.data(), this->mono.data(), kernels->hrir->left_channel, kernels->hrir->channel_length);
         this->hright_buffer->process(out_channels->right_channel.data(), this->mono.data(), kernels->hrir->right_channel, kernels->hrir->channel_length);
 
-        std::transform(
-            out_channels->left_channel.begin(), out_channels->left_channel.end(), out_channels->left_channel.begin(),
-            [](double x) {
-                return std::tanh(x * SOFT_CLIP_FACTOR);
-            }
-        );
-
-        std::transform(
-            out_channels->right_channel.begin(), out_channels->right_channel.end(), out_channels->right_channel.begin(),
-            [](double x) {
-                return std::tanh(x * SOFT_CLIP_FACTOR);
-            }
-        );
+        for (size_t i = 0; i < this->chunk; ++i) {
+            double left_ch = out_channels->left_channel[i];
+            double right_ch = out_channels->right_channel[i];
+            out_channels->left_channel[i] = std::tanh(left_ch * SOFT_CLIP_FACTOR);
+            out_channels->right_channel[i] = std::tanh(right_ch * SOFT_CLIP_FACTOR);
+        }
     }
 
 private:

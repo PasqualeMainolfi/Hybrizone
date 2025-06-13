@@ -10,6 +10,7 @@
 #include <cstring>
 #include <format>
 #include <iostream>
+#include <numeric>
 #include <string>
 #include <vector>
 
@@ -36,6 +37,16 @@ public:
         this->geometric_attenuation = new GeometricAttenuation(this->fs, 1);
         this->db_attenuation = std::vector<double>();
         this->iso9613 = nullptr;
+
+        this->cross_fade_length = static_cast<size_t>(INTERNAL_KERNEL_TRANSITION * this->fs);
+        this->cross_fade_coeff_a = std::vector<double>(this->cross_fade_length);
+        this->cross_fade_coeff_b = std::vector<double>(this->cross_fade_length);
+        for (size_t i = 0; i < this->cross_fade_length; ++i) {
+            double alpha_linear =  static_cast<double>(i) / static_cast<double>(this->cross_fade_length - 1);
+            double alpha = alpha_linear * M_PI_2;
+            this->cross_fade_coeff_a[i] = std::cos(alpha);
+            this->cross_fade_coeff_b[i] = std::sin(alpha);
+        }
     }
 
     ~RBuilder() {
@@ -152,8 +163,7 @@ public:
         if (this->prev_distance != -1.0 && this->prev_distance != distance) {
             double d = std::abs(distance - this->prev_distance);
             if (d > MAX_CROSSFADE_DISTANCE) {
-                double tlength = (size_t) (INTERNAL_KERNEL_TRANSITION * this->fs);
-                cross_fade(this->prev_distance_rir.data(), current_temp.data(), tlength);
+                cross_fade(this->prev_distance_rir.data(), current_temp.data(), this->cross_fade_coeff_a.data(), this->cross_fade_coeff_b.data(), this->cross_fade_length);
             }
         }
 
@@ -175,6 +185,9 @@ private:
     std::vector<double> db_attenuation;
     GeometricAttenuation* geometric_attenuation;
     double source_distance;
+    size_t cross_fade_length;
+    std::vector<double> cross_fade_coeff_a;
+    std::vector<double> cross_fade_coeff_b;
 
     void get_spectral_envelope(fftw_complex* x, double* y, size_t frame_size, size_t fft_size, double smooth_factor) {
         fftw_complex* db = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * fft_size);
@@ -203,30 +216,27 @@ private:
         fftw_execute(fft);
         fftw_destroy_plan(fft);
 
-        std::vector<double> realcep_real(fft_size);
-        double rc_mean = 0.0;
-        for (size_t i = 0; i < fft_size; ++i) {
-            double re = realcep[i][0];
-            realcep_real[i] = re;
-            rc_mean += re;
-        }
-
-        rc_mean /= static_cast<double>(fft_size);
-
-        for (size_t i = 0; i < fft_size; ++i) {
-            double value = realcep_real[i];
-            realcep_real[i] = std::exp(value - rc_mean);
-        }
+        std::vector<double> realcep_real(fft_size, 1.0);
+        for (size_t i = 0; i < fft_size; ++i) realcep_real[i] = realcep[i][0];
 
         fftw_free(realcep);
 
+        double rc_mean = std::accumulate(realcep_real.begin(), realcep_real.end(), 0.0) / static_cast<double>(fft_size);
+        std::transform(
+            realcep_real.begin(), realcep_real.end(), realcep_real.begin(), [&rc_mean](double x) {
+                return std::exp(x - rc_mean);
+            }
+        );
+
         size_t kernel_length = static_cast<size_t>(fft_size * smooth_factor);
         std::vector<double> smooth_kernel(kernel_length, 1.0);
-        for (size_t i = 0; i < kernel_length; ++i) {
-            smooth_kernel[i] /= static_cast<double>(kernel_length);
-        }
+        std::transform(
+            smooth_kernel.begin(), smooth_kernel.end(), smooth_kernel.begin(), [&kernel_length](double x) {
+                return x / static_cast<double>(kernel_length);
+            }
+        );
 
-        std::vector<double> rc_smoothed;
+        std::vector<double, xsimd::aligned_allocator<double>> rc_smoothed;
         fft_convolve(&rc_smoothed, realcep_real.data(), smooth_kernel.data(), fft_size, kernel_length, ConvMode::SAME);
 
         auto max_smooth_it = std::max_element(

@@ -60,7 +60,7 @@ int main(void) {
     double max_distance = 30.0;
     while (true) {
 
-        std::vector<double> frame(CHUNK);
+        std::vector<double, xsimd::aligned_allocator<double>> frame(CHUNK);
         sf_count_t fcount = sf_read_double(audio_file_in, frame.data(), CHUNK);
         if (fcount <= 0) break;
 
@@ -82,21 +82,19 @@ int main(void) {
 
         // generate kernels time
         auto time_to_generate_kernels = std::chrono::high_resolution_clock::now();
-        std::chrono::duration<double> t_kernels = time_to_generate_kernels - start_time;
+        std::chrono::duration<double> t_kernels = std::chrono::high_resolution_clock::now() - start_time;
 
         HybriOuts channels;
         hybri.process_frame(&channels, frame.data(), &kernels);
 
         // time to convolve
-        auto time_to_convolve = std::chrono::high_resolution_clock::now();
-        std::chrono::duration<double> t_convolve = time_to_convolve - start_time;
+        std::chrono::duration<double> t_convolve = std::chrono::high_resolution_clock::now() - time_to_generate_kernels;
 
         std::vector<float> interleaved = channels.get_float_interleaved();
         Pa_WriteStream(stream, interleaved.data(), CHUNK);
 
         // total time
-        auto total_time = std::chrono::high_resolution_clock::now();
-        std::chrono::duration<double> t_time = total_time - start_time;
+        std::chrono::duration<double> t_time = std::chrono::high_resolution_clock::now() - start_time;
 
     #ifdef DEBUG
         // get times

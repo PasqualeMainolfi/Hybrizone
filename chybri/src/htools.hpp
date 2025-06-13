@@ -14,9 +14,10 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <xsimd/xsimd.hpp>
 
 #define P_REF (101325.0)
-#define T0 (293.15)
+#define T_ZERO (293.15)
 #define NFREQS (256)
 #define MAX_DELAY_SEC (1.0)
 #define SOUND_SPEED (343.3)
@@ -33,6 +34,21 @@
 #define MAX_TRANSITION_SAMPLES (512)
 #define SOFT_CLIP_FACTOR (1.0 / 0.707)
 #define MAX_OSA_BUFFER_SIZE (22050)
+
+
+inline void from_interleaved_to_single(double* interleaved, double* a, double* b, size_t out_size) {
+    for (size_t i = 0; i < out_size; ++i) {
+        a[i] = interleaved[i * 2];
+        b[i] = interleaved[i * 2 + 1];
+    }
+}
+
+inline void from_fftw_complex_to_double_interleaved(fftw_complex* x, double* interleaved, size_t size) {
+    for (size_t i = 0; i < size; ++i) {
+        interleaved[i * 2] = x[i][0];
+        interleaved[i * 2 + 1] = x[i][1];
+    }
+}
 
 inline size_t next_power_of_two(size_t n) {
     if (n == 0) return 1;
@@ -233,12 +249,12 @@ inline SlerpCoeff slerp_coefficients(CartesianPoint* p, CartesianPoint* p1, Cart
 
 struct Hrir
 {
-    std::vector<double> left_channel;
-    std::vector<double> right_channel;
+    std::vector<double, xsimd::aligned_allocator<double>> left_channel;
+    std::vector<double, xsimd::aligned_allocator<double>> right_channel;
     size_t channel_length;
 
     Hrir()
-    : left_channel(std::vector<double>()), right_channel(std::vector<double>()), channel_length(0)
+    : left_channel(std::vector<double, xsimd::aligned_allocator<double>>()), right_channel(std::vector<double, xsimd::aligned_allocator<double>>()), channel_length(0)
     { }
 
     Hrir(const Hrir& h)
@@ -313,7 +329,7 @@ public:
     }
 
     // function can return hrir, itd, hrtf mag and angle
-    void get_hrir_data(std::vector<double>* buffer, const char* key, HDataType data_type) {
+    void get_hrir_data(std::vector<double, xsimd::aligned_allocator<double>>* buffer, const char* key, HDataType data_type) {
         H5::DataSet h;
         std::string k;
         hsize_t dims[2];
@@ -424,7 +440,7 @@ public:
     void get_attenuation_air_absorption(double* alpha) {
         double p_sat = P_REF * (pow(10.0, (-6.8346 * pow((273.16 / this->air_data->kelvin), 1.261) + 4.6151)));
         double h = this->air_data->rh * (p_sat / (this->air_data->p_atm * P_REF));
-        double tr = this->air_data->kelvin / T0;
+        double tr = this->air_data->kelvin / T_ZERO;
         double tr_pos = pow(tr, 0.5);
         double tr_neg1 = pow(tr, -0.5);
         double tr_neg2 = pow(tr, -2.5);
@@ -564,8 +580,8 @@ struct SpatialNeighs
 };
 
 SpatialNeighs spatial_match(CartesianPoint* target, HrirDatasetRead* dataset);
-void cross_fade(double* prev_kernel, double* current_kernel, size_t transition_length);
-void fft_convolve(std::vector<double>* buffer, double* x, double* kernel, size_t x_size, size_t k_size, ConvMode conv_mode);
+void cross_fade(double* prev_kernel, double* current_kernel, double* a, double* b, size_t transition_length);
+void fft_convolve(std::vector<double, xsimd::aligned_allocator<double>>* buffer, double* x, double* kernel, size_t x_size, size_t k_size, ConvMode conv_mode);
 
 struct Morphdata
 {
@@ -737,11 +753,11 @@ struct RirFromDataset
 
 struct Rir
 {
-    std::vector<double> rir;
+    std::vector<double, xsimd::aligned_allocator<double>> rir;
     size_t length;
 
     Rir()
-    : rir(std::vector<double>()), length(0)
+    : rir(std::vector<double, xsimd::aligned_allocator<double>>()), length(0)
     { }
 
     Rir(const Rir& r) {
@@ -823,17 +839,17 @@ private:
 
 struct OSABuffer
 {
-    std::vector<double> buffer;
+    std::vector<double, xsimd::aligned_allocator<double>> buffer;
     size_t conv_buffer_size;
 
     OSABuffer()
-    : buffer(std::vector<double>()), conv_buffer_size(0)
+    : buffer(std::vector<double, xsimd::aligned_allocator<double>>()), conv_buffer_size(0)
     { }
 
-    ~OSABuffer() { }
+    ~OSABuffer() = default;
 };
 
-void apply_intermediate(OSABuffer* osa_buffer, double* x, std::vector<double> prev_kernel, std::vector<double> curr_kernel, size_t x_length, size_t prev_kernel_length, size_t curr_kernel_length, size_t transition_length);
+void apply_intermediate(OSABuffer* osa_buffer, double* x, std::vector<double, xsimd::aligned_allocator<double>> prev_kernel, std::vector<double, xsimd::aligned_allocator<double>> curr_kernel, size_t x_length, size_t prev_kernel_length, size_t curr_kernel_length, size_t transition_length);
 void intermediate_segment(double* buffer, double* x, double* prev_kernel, double* curr_kernel, size_t ksize, size_t transition_size);
 
 class OSAConv
@@ -843,15 +859,15 @@ public:
     : buffer_size(chunk_size)
     {
         this->init_buffer_size = MAX_OSA_BUFFER_SIZE;
-        this->buffer = std::vector<double>(this->init_buffer_size, 0.0);
+        this->buffer = std::vector<double, xsimd::aligned_allocator<double>>(this->init_buffer_size, 0.0);
         this->transition_size = this->buffer_size < 1024 ? static_cast<size_t>(this->buffer_size * OSA_TRANSITION_FACTOR) : MAX_TRANSITION_SAMPLES;
-        this->prev_kernel = std::vector<double>();
+        this->prev_kernel = std::vector<double, xsimd::aligned_allocator<double>>();
         this->prev_kernel_size = 0;
     }
 
     ~OSAConv() = default;
 
-    void process(double* buffer_out, double* x, std::vector<double> kernel, size_t kernel_size) {
+    void process(double* buffer_out, double* x, std::vector<double, xsimd::aligned_allocator<double>> kernel, size_t kernel_size) {
 
         OSABuffer b;
         apply_intermediate(&b, x, this->prev_kernel, kernel, this->buffer_size, this->prev_kernel_size, kernel_size, this->transition_size);
@@ -872,11 +888,12 @@ public:
         int tail_size = static_cast<int>(b.conv_buffer_size) - static_cast<int>(this->buffer_size);
         if (tail_size > 0) {
             if (static_cast<double>(tail_size) > this->init_buffer_size) {
-                std::vector<double> temp_internal_buffer(tail_size, 0.0);
+                std::vector<double, xsimd::aligned_allocator<double>> temp_internal_buffer(tail_size, 0.0);
                 memcpy(temp_internal_buffer.data(), this->buffer.data(), sizeof(double) * this->init_buffer_size);
                 this->buffer = temp_internal_buffer;
                 this->init_buffer_size = tail_size;
             }
+
             for (int i = 0; i < tail_size; ++i) {
                 this->buffer[i] += b.buffer[i + this->buffer_size];
             }
@@ -887,8 +904,8 @@ private:
     size_t init_buffer_size;
     size_t buffer_size;
     size_t transition_size;
-    std::vector<double> buffer;
-    std::vector<double> prev_kernel;
+    std::vector<double, xsimd::aligned_allocator<double>> buffer;
+    std::vector<double, xsimd::aligned_allocator<double>> prev_kernel;
     size_t prev_kernel_size;
 };
 
@@ -902,7 +919,7 @@ struct HybriOuts
     : left_channel(std::vector<double>()), right_channel(std::vector<double>()), buffer_size(0)
     { }
 
-    ~HybriOuts() { }
+    ~HybriOuts() = default;
 
     std::vector<float> get_float_interleaved() {
         std::vector<float> interleaved(this->buffer_size * 2);

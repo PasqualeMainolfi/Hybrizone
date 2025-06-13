@@ -70,3 +70,12 @@ make run
 You can use `/chybri/test.cpp` as a reference for how to use the C++ API.  
 To measure and print processing time, use the `make debug`.  
 **NOTE**: The C++ version is operational, but still in development and subject to change.  
+
+To compile the C++ version, you need the following libraries:
+
+- **hdf5**, **hdf5_cpp**
+- **fftw3**
+- **portaudio**
+- **libsndfile**
+
+Make sure to update the Makefile accordingly with your system-specific paths for both INCLUDE and LIBRARY.
