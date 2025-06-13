@@ -7,8 +7,6 @@ import time
 import soundfile as sf
 
 
-# TODO: BISOGNA RISOLVERE IL PROBLEMA DELLA SINCRONIZZAZIONE PER LA RICERCA DELLA POSIZIONE IMMESSA __start_space_data_process METHOD IN get_rir_and_hrir METHOD
-
 # main scripts
 HRIR_PATH = "/Users/pm/AcaHub/Coding/BinauralSpatial/data/HRIR-KEMAR_DATASET.h5"
 RIR_PATH = "/Users/pm/AcaHub/Coding/BinauralSpatial/data/RIR-MIT_SURVEY.h5"

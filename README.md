@@ -14,10 +14,28 @@ To use the framework, you first need to generate two compatible .h5 datasets wit
 
 One for HRIRs (Head-Related Impulse Responses):
 
-1. Dataset name `polar_index` representing polar coordinates (azimuth \theta, elevation \phi) with shape (n, 2).
-2. Dataset named `interaural_coords` of Cartesian coordinates in interaural mode, defined as: ($x = \sin(\theta)$, $y = \cos(\theta)\cos(\phi)$, $z = \cos(\theta)\sin(\phi)$) with shape (n, 3).
-3. Dataset named `regular_coordinates`: Integer indices of Cartesian coordinates in regular mode, defined as: ($x = \sin(\theta)\cos(\phi)$, $y = \cos(\theta)\cos(\phi)$, $z = \sin(\phi)$) with shape (n, 3).
-4. Group `hrir`: Contains sub-datasets for each coordinate set (named `elev_azim`), each with HRIRs in the time domain, shape (n, 2), with no ITD (Interaural Time Difference).
+1. Dataset name `polar_index` representing polar coordinates (azimuth $\theta$, elevation $\phi$) with shape (n, 2) (int).
+2. Dataset named `interaural_coords` of Cartesian coordinates in interaural mode with shape (n, 3) (float), defined as:
+
+    $$
+    \begin{cases}
+    &x = \sin(\theta) \\  
+    &y = \cos(\theta)\cos(\phi) \\
+    &z = \cos(\theta)\sin(\phi)
+    \end{cases}
+    $$
+
+3. Dataset named `regular_coordinates`: Integer indices of Cartesian coordinates in regular mode with shape (n, 3) (float), defined as:
+
+    $$
+    \begin{cases}
+    &x = \sin(\theta)\cos(\phi) \\  
+    &y = \cos(\theta)\cos(\phi) \\
+    &z = \sin(\phi)
+    \end{cases}
+    $$
+
+4. Group `hrir`: Contains sub-datasets for each coordinate  `elev_azim` set with HRIRs in the time domain, shape (n, 2), with ITD removed.
 5. Group `hrir_fft`: For each coordinate subgroup named `elev_azim`, contains datasets `fft`, `mag`, and `angle`, representing the frequency domain HRIR components without ITD.
 6. Group `hrir_itd`: Contains datasets for each coordinate `elev_azim` set with the extracted ITD values in seconds using the provided scripts `get_itd.py`.
 7. Attribute `hrir_shape`: Specifies the shape of the HRIR data.
@@ -33,8 +51,16 @@ One for RIRs (Room Impulse Responses)
 
 ### Using framework
 
-To run the Python prototype, see `/pyhybri/rt_test.py` to use the python prototype.  
-If you prefer to use the C++ version, navigate to the `/chybri` directory and compile it with:
+To run the Python prototype, see `/pyhybri/rt_test.py` to use the python prototype as an example.
+If you prefer to use the C++ version, navigate to the `/chybri` directory. In `test.cpp` set the `HRIR_DATASET_PATH` and `RIR_DATASET_PATH` environment variables to point to the respective datasets, and `AUDIO` to the audio file you want to auralize.  
+
+```c++
+#define HRIR_DATASET_PATH ("<path_to_HRIR_dataset.h5>")
+#define RIR_DATASET_PATH ("<path_to_RIR_dataset.h5>")
+#define AUDIO_FILE ("<path_to_audio_file.wav>")
+```
+
+Then, compile the project using:
 
 ```shell
 make build
@@ -42,6 +68,5 @@ make run
 ```
 
 You can use `/chybri/test.cpp` as a reference for how to use the C++ API.  
-
-The C++ version is operational, but still in development and subject to change.  
-To measure and print processing time, use the `make debug`.
+To measure and print processing time, use the `make debug`.  
+**NOTE**: The C++ version is operational, but still in development and subject to change.  
