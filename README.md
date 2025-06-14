@@ -17,15 +17,11 @@ One for HRIRs (Head-Related Impulse Responses):
 1. Dataset name `polar_index` representing polar coordinates (azimuth $\theta$, elevation $\phi$) with shape (n, 2) (int).
 2. Dataset named `interaural_coords` of Cartesian coordinates in interaural mode with shape (n, 3) (float), defined as:
 
-    ```math
-    x = \sin(\theta),\text{ } y = \cos(\theta)\cos(\phi),\text{ } z = \cos(\theta)\sin(\phi)
-    ```
+    $$x = \sin(\theta),\quad y = \cos(\theta)\cos(\phi),\quad z = \cos(\theta)\sin(\phi)$$
 
 3. Dataset named `regular_coordinates`: Integer indices of Cartesian coordinates in regular mode with shape (n, 3) (float), defined as:
 
-    ```math
-    x = \sin(\theta)\cos(\phi),\text{ } y = \cos(\theta)\cos(\phi),\text{ } z = \sin(\phi)
-    ```
+    $$x = \sin(\theta)\cos(\phi),\quad y = \cos(\theta)\cos(\phi),\quad z = \sin(\phi)$$
 
 4. Group `hrir`: Contains sub-datasets for each coordinate  `elev_azim` set with HRIRs in the time domain, shape (n, 2), with ITD removed.
 5. Group `hrir_fft`: For each coordinate subgroup named `elev_azim`, contains datasets `fft`, `mag`, and `angle`, representing the frequency domain HRIR components without ITD.
