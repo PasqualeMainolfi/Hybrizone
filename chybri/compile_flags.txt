@@ -13,4 +13,3 @@
  -L/opt/homebrew/opt/portaudio/lib
  -I/opt/homebrew/opt/libsndfile/include
  -L/opt/homebrew/opt/libsndfile/lib
- -I/opt/homebrew/opt/xsimd/include

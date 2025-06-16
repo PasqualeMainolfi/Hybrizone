@@ -11,18 +11,17 @@
 #include <cstdlib>
 #include <string>
 #include <vector>
-#include <xsimd/xsimd.hpp>
 
 struct HData
 {
-    std::vector<double, xsimd::aligned_allocator<double>> hrtf_mag;
-    std::vector<double, xsimd::aligned_allocator<double>> hrtf_angle;
+    std::vector<double> hrtf_mag;
+    std::vector<double> hrtf_angle;
     double itd;
     CartesianPoint coord;
 
     HData() {
-        this->hrtf_mag = std::vector<double, xsimd::aligned_allocator<double>>();
-        this->hrtf_angle = std::vector<double, xsimd::aligned_allocator<double>>();
+        this->hrtf_mag = std::vector<double>();
+        this->hrtf_angle = std::vector<double>();
         this->itd = 0.0;
         this->coord = CartesianPoint();
     }
@@ -91,18 +90,18 @@ public:
         this->left_ifft = fftw_plan_dft_c2r_1d(this->hsize, this->slerp_fft_left_channel, this->slerp_ifft_left_channel.data(), FFTW_ESTIMATE);
         this->right_ifft = fftw_plan_dft_c2r_1d(this->hsize, this->slerp_fft_right_channel, this->slerp_ifft_right_channel.data(), FFTW_ESTIMATE);
 
-        this->current_left_channel = std::vector<double, xsimd::aligned_allocator<double>>(this->hsize, 0.0);
-        this->current_right_channel = std::vector<double, xsimd::aligned_allocator<double>>(this->hsize, 0.0);
+        this->current_left_channel = std::vector<double>(this->hsize, 0.0);
+        this->current_right_channel = std::vector<double>(this->hsize, 0.0);
 
         this->prev_distance = -1.0;
-        this->prev_left_channel = std::vector<double, xsimd::aligned_allocator<double>>(this->hsize, 0.0);
-        this->prev_right_channel = std::vector<double, xsimd::aligned_allocator<double>>(this->hsize, 0.0);
+        this->prev_left_channel = std::vector<double>(this->hsize, 0.0);
+        this->prev_right_channel = std::vector<double>(this->hsize, 0.0);
 
         this->cache = new LRUCache(CACHE_CAPACITY, CacheType::HRIR);
 
         this->cross_fade_length = static_cast<size_t>(INTERNAL_KERNEL_TRANSITION * this->fs);
-        this->cross_fade_coeff_a = std::vector<double, xsimd::aligned_allocator<double>>(this->cross_fade_length);
-        this->cross_fade_coeff_b = std::vector<double, xsimd::aligned_allocator<double>>(this->cross_fade_length);
+        this->cross_fade_coeff_a = std::vector<double>(this->cross_fade_length);
+        this->cross_fade_coeff_b = std::vector<double>(this->cross_fade_length);
         for (size_t i = 0; i < this->cross_fade_length; ++i) {
             double alpha_linear =  static_cast<double>(i) / static_cast<double>(this->cross_fade_length - 1);
             double alpha = alpha_linear * M_PI_2;
@@ -110,7 +109,7 @@ public:
             this->cross_fade_coeff_b[i] = std::sin(alpha);
         }
 
-        this->f_shift_itd = std::vector<double, xsimd::aligned_allocator<double>>(this->hsize);
+        this->f_shift_itd = std::vector<double>(this->hsize);
         double f_factor = this->fs / static_cast<double>(this->hsize - 1);
         for (size_t i = 0; i < this->hsize; ++i) {
             double f =  static_cast<double>(i) * f_factor;
@@ -193,11 +192,11 @@ public:
             double current_distance = this->hinfo->target.rho;
             this->distance_based(current_distance);
 
-            std::vector<double, xsimd::aligned_allocator<double>> target_left = this->current_left_channel;
-            std::vector<double, xsimd::aligned_allocator<double>> target_right = this->current_right_channel;
+            std::vector<double> target_left = this->current_left_channel;
+            std::vector<double> target_right = this->current_right_channel;
 
-            std::vector<double, xsimd::aligned_allocator<double>> crossed_left = target_left;
-            std::vector<double, xsimd::aligned_allocator<double>> crossed_right = target_right;
+            std::vector<double> crossed_left = target_left;
+            std::vector<double> crossed_right = target_right;
 
             if (this->prev_distance != -1.0 && this->prev_distance != current_distance) {
                 double d = abs(this->prev_distance - current_distance);
@@ -229,16 +228,16 @@ private:
     std::vector<double> slerp_ifft_right_channel;
     fftw_plan left_ifft;
     fftw_plan right_ifft;
-    std::vector<double, xsimd::aligned_allocator<double>> current_left_channel;
-    std::vector<double, xsimd::aligned_allocator<double>> current_right_channel;
-    std::vector<double, xsimd::aligned_allocator<double>> prev_left_channel;
-    std::vector<double, xsimd::aligned_allocator<double>> prev_right_channel;
+    std::vector<double> current_left_channel;
+    std::vector<double> current_right_channel;
+    std::vector<double> prev_left_channel;
+    std::vector<double> prev_right_channel;
     double prev_distance;
     LRUCache* cache;
     size_t cross_fade_length;
-    std::vector<double, xsimd::aligned_allocator<double>> cross_fade_coeff_a;
-    std::vector<double, xsimd::aligned_allocator<double>> cross_fade_coeff_b;
-    std::vector<double, xsimd::aligned_allocator<double>> f_shift_itd;
+    std::vector<double> cross_fade_coeff_a;
+    std::vector<double> cross_fade_coeff_b;
+    std::vector<double> f_shift_itd;
 
     void hslerp() {
         CartesianPoint trg = this->hinfo->target.get_cartesian();
@@ -255,8 +254,8 @@ private:
 
         size_t half_size = this->hsize / 2 + 1;
 
-        std::vector<double, xsimd::aligned_allocator<double>> unwrapped_h1_angle = this->hinfo->h1->hrtf_angle;
-        std::vector<double, xsimd::aligned_allocator<double>> unwrapped_h2_angle = this->hinfo->h2->hrtf_angle;
+        std::vector<double> unwrapped_h1_angle = this->hinfo->h1->hrtf_angle;
+        std::vector<double> unwrapped_h2_angle = this->hinfo->h2->hrtf_angle;
         unwrap_phase(unwrapped_h1_angle.data(), half_size);
         unwrap_phase(unwrapped_h2_angle.data(), half_size);
 
@@ -294,8 +293,8 @@ private:
     }
 
     void distance_based(double rho) {
-        std::vector<double, xsimd::aligned_allocator<double>> left_temp = this->current_left_channel;
-        std::vector<double, xsimd::aligned_allocator<double>> right_temp = this->current_right_channel;
+        std::vector<double> left_temp = this->current_left_channel;
+        std::vector<double> right_temp = this->current_right_channel;
 
         this->geometric_attenuation->apply_fractional_delay(left_temp.data(), this->current_left_channel.data(), rho, 0, this->hsize);
         this->geometric_attenuation->apply_fractional_delay(right_temp.data(), this->current_right_channel.data(), rho, 1, this->hsize);

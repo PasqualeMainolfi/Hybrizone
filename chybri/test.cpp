@@ -60,7 +60,7 @@ int main(void) {
     double max_distance = 30.0;
     while (true) {
 
-        std::vector<double, xsimd::aligned_allocator<double>> frame(CHUNK);
+        std::vector<double> frame(CHUNK);
         sf_count_t fcount = sf_read_double(audio_file_in, frame.data(), CHUNK);
         if (fcount <= 0) break;
 

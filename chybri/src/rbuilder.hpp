@@ -236,7 +236,7 @@ private:
             }
         );
 
-        std::vector<double, xsimd::aligned_allocator<double>> rc_smoothed;
+        std::vector<double> rc_smoothed;
         fft_convolve(&rc_smoothed, realcep_real.data(), smooth_kernel.data(), fft_size, kernel_length, ConvMode::SAME);
 
         auto max_smooth_it = std::max_element(

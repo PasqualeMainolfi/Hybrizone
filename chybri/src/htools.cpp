@@ -7,7 +7,6 @@
 #include <cstring>
 #include <limits>
 #include <vector>
-#include <xsimd/xsimd.hpp>
 
 void lerp(double* x, double* y, double* xnew, double* yout, size_t xsize, size_t xnew_size, bool fill_value) {
     for (size_t i = 0; i < xnew_size; ++i) {
@@ -81,7 +80,7 @@ void cross_fade(double* prev_kernel, double* current_kernel, double* a, double* 
     }
 };
 
-void fft_convolve(std::vector<double, xsimd::aligned_allocator<double>>* buffer, double* x, double* kernel, size_t x_size, size_t k_size, ConvMode conv_mode) {
+void fft_convolve(std::vector<double>* buffer, double* x, double* kernel, size_t x_size, size_t k_size, ConvMode conv_mode) {
     size_t conv_size_temp = x_size + k_size - 1;
     size_t conv_size = next_power_of_two(conv_size_temp);
     std::vector<double> x_padded(conv_size, 0.0);
@@ -147,15 +146,15 @@ void intermediate_segment(double* buffer, double* x, double* prev_kernel, double
     }
 }
 
-void apply_intermediate(OSABuffer* osa_buffer, double* x, std::vector<double, xsimd::aligned_allocator<double>> prev_kernel, std::vector<double, xsimd::aligned_allocator<double>> curr_kernel, size_t x_length, size_t prev_kernel_length, size_t curr_kernel_length, size_t transition_length) {
+void apply_intermediate(OSABuffer* osa_buffer, double* x, std::vector<double> prev_kernel, std::vector<double> curr_kernel, size_t x_length, size_t prev_kernel_length, size_t curr_kernel_length, size_t transition_length) {
     if (prev_kernel_length <= 0) {
         fft_convolve(&osa_buffer->buffer, x, curr_kernel.data(), x_length, curr_kernel_length, ConvMode::FULL);
         osa_buffer->conv_buffer_size = x_length + curr_kernel_length - 1;
         return;
     }
 
-    std::vector<double, xsimd::aligned_allocator<double>> kprev = prev_kernel;
-    std::vector<double, xsimd::aligned_allocator<double>> kcurr = curr_kernel;
+    std::vector<double> kprev = prev_kernel;
+    std::vector<double> kcurr = curr_kernel;
 
     size_t ksize = std::max(prev_kernel_length, curr_kernel_length);
     size_t conv_length = x_length + ksize - 1;
@@ -164,10 +163,10 @@ void apply_intermediate(OSABuffer* osa_buffer, double* x, std::vector<double, xs
     intermediate_segment(osa_buffer->buffer.data(), x, kprev.data(), kcurr.data(), ksize, transition_length);
 
     size_t x_rest_size = x_length - transition_length;
-    std::vector<double, xsimd::aligned_allocator<double>> xtemp(x_rest_size, 0.0);
+    std::vector<double> xtemp(x_rest_size, 0.0);
     memcpy(xtemp.data(), x + transition_length, sizeof(double) * x_rest_size);
 
-    std::vector<double, xsimd::aligned_allocator<double>> rest_part;
+    std::vector<double> rest_part;
     fft_convolve(&rest_part, xtemp.data(), kcurr.data(), x_rest_size, ksize, ConvMode::FULL);
 
     size_t x_rest_conv_size = x_rest_size + ksize - 1;
