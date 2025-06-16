@@ -245,7 +245,7 @@ private:
             }
         );
 
-        double max_rc = *max_smooth_it;
+        double max_rc = std::abs(*max_smooth_it);
         double scale_factor = mag_max / (max_rc + 1e-12);
         std::transform(
             rc_smoothed.begin(), rc_smoothed.begin() + fft_size, rc_smoothed.begin(), [&scale_factor](double x) {
