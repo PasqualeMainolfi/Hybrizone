@@ -639,6 +639,51 @@ struct Morphdata
     }
 };
 
+enum FFT_DIRECTION
+{
+    FORWARD,
+    BACKWARD
+};
+
+class FFT
+{
+public:
+    size_t fft_length;
+    size_t half_size;
+    fftw_complex* complex_data;
+    std::vector<double> real_data;
+    fftw_plan pfft;
+    fftw_plan pifft;
+
+    FFT(size_t n)
+    : fft_length(n), half_size(n / 2 + 1)
+    {
+        this->complex_data = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * this->half_size);
+        this->real_data = std::vector<double>(this->fft_length);
+        this->pifft = fftw_plan_dft_c2r_1d(this->fft_length, this->complex_data, this->real_data.data(), FFTW_ESTIMATE);
+        this->pfft = fftw_plan_dft_r2c_1d(this->fft_length, this->real_data.data(), this->complex_data, FFTW_ESTIMATE);
+    }
+
+    ~FFT() {
+        fftw_free(this->complex_data);
+        fftw_destroy_plan(this->pfft);
+        fftw_destroy_plan(this->pifft);
+    }
+
+    void transform(void* data, FFT_DIRECTION direction) {
+        switch (direction) {
+            case FFT_DIRECTION::FORWARD:
+                memcpy(this->real_data.data(), (double*) data, sizeof(double) * this->fft_length);
+                fftw_execute(this->pfft);
+                break;
+            case FFT_DIRECTION::BACKWARD:
+                memcpy(this->complex_data, (fftw_complex*) data, sizeof(fftw_complex*) * this->half_size);
+                fftw_execute(this->pifft);
+                break;
+        }
+    }
+};
+
 struct CacheNode
 {
 public:
