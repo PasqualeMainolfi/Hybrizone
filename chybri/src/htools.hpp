@@ -607,8 +607,8 @@ struct Morphdata
     { }
 
     Morphdata(const Morphdata& other) {
-        this->smooth_factor = other.smooth_factor;
         this->lenght = other.lenght;
+        this->smooth_factor = other.smooth_factor;
         this->fftw_length = other.fftw_length;
 
         this->source_a = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * this->fftw_length);
