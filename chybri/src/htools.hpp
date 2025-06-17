@@ -108,7 +108,8 @@ enum ConvMode
 enum CacheType
 {
     HRIR,
-    RIR
+    RIR,
+    FFT
 };
 
 enum HDataType
@@ -413,6 +414,344 @@ void lerp(double* x, double* y, double* xnew, double* yout, size_t xsize, size_t
 // itd calculation
 double woodworth_itd3d(const PolarPoint& p);
 
+enum FFT_DIRECTION
+{
+    FORWARD,
+    BACKWARD
+};
+
+class FFT
+{
+public:
+    size_t fft_length;
+    size_t half_size;
+    fftw_complex* complex_data;
+    std::vector<double> real_data;
+    fftw_plan pfft;
+    fftw_plan pifft;
+
+    FFT(size_t n)
+    : fft_length(n), half_size(n / 2 + 1)
+    {
+        this->complex_data = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * this->half_size);
+        this->real_data = std::vector<double>(this->fft_length);
+        this->pifft = fftw_plan_dft_c2r_1d(this->fft_length, this->complex_data, this->real_data.data(), FFTW_ESTIMATE);
+        this->pfft = fftw_plan_dft_r2c_1d(this->fft_length, this->real_data.data(), this->complex_data, FFTW_ESTIMATE);
+    }
+
+    ~FFT() {
+        fftw_free(this->complex_data);
+        fftw_destroy_plan(this->pfft);
+        fftw_destroy_plan(this->pifft);
+    }
+
+    void transform(void* data, FFT_DIRECTION direction) {
+        switch (direction) {
+            case FFT_DIRECTION::FORWARD:
+                memcpy(this->real_data.data(), (double*) data, sizeof(double) * this->fft_length);
+                fftw_execute(this->pfft);
+                break;
+            case FFT_DIRECTION::BACKWARD:
+                memcpy(this->complex_data, (fftw_complex*) data, sizeof(fftw_complex*) * this->half_size);
+                fftw_execute(this->pifft);
+                break;
+        }
+    }
+};
+
+struct Morphdata
+{
+    fftw_complex* source_a;
+    fftw_complex* source_b;
+    fftw_complex* morphed;
+    double smooth_factor;
+    size_t lenght;
+    size_t fftw_length;
+    fftw_complex* ifft_in;
+    std::vector<double> out_morphed;
+    fftw_plan pifft;
+
+    Morphdata()
+    : source_a(nullptr),
+    source_b(nullptr),
+    morphed(nullptr),
+    smooth_factor(0.0),
+    lenght(0),
+    fftw_length(0),
+    ifft_in(nullptr),
+    out_morphed(std::vector<double>()),
+    pifft(nullptr)
+    { }
+
+    Morphdata(const Morphdata& other) {
+        this->lenght = other.lenght;
+        this->smooth_factor = other.smooth_factor;
+        this->fftw_length = other.fftw_length;
+
+        this->source_a = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * this->fftw_length);
+        this->source_b = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * this->fftw_length);
+        this->morphed = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * this->fftw_length);
+
+        memcpy(this->source_a, other.source_a, sizeof(fftw_complex) * this->fftw_length);
+        memcpy(this->source_b, other.source_b, sizeof(fftw_complex) * this->fftw_length);
+        memcpy(this->morphed, other.morphed, sizeof(fftw_complex) * this->fftw_length);
+
+        this->ifft_in = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * this->fftw_length);
+        this->out_morphed = std::vector<double>(this->lenght, 0.0);
+        this->pifft = fftw_plan_dft_c2r_1d(this->lenght, this->ifft_in, this->out_morphed.data(), FFTW_ESTIMATE);
+    }
+
+    ~Morphdata() {
+        fftw_free(this->source_a);
+        fftw_free(this->source_b);
+        fftw_free(this->morphed);
+        fftw_free(this->ifft_in);
+        this->ifft_in = nullptr;
+        fftw_destroy_plan(this->pifft);
+    }
+
+    void execute_ifft(fftw_complex* x_ifft) {
+        memcpy(this->ifft_in, x_ifft, sizeof(fftw_complex) * this->fftw_length);
+        fftw_execute(this->pifft);
+    }
+};
+
+struct CacheNode
+{
+public:
+    std::string key;
+    void* value;
+    CacheNode* prev_node;
+    CacheNode* next_node;
+
+    CacheNode(const std::string& key_, void* value_)
+    : key(key_), value(value_), prev_node(nullptr), next_node(nullptr)
+    { }
+};
+
+class LRUCache
+{
+public:
+    size_t capacity;
+    CacheType ctype;
+    std::unordered_map<std::string, CacheNode*>* cache;
+    CacheNode* head;
+    CacheNode* tail;
+
+    LRUCache(size_t cache_size, CacheType cache_type) {
+        this->capacity = cache_size;
+        this->ctype = cache_type;
+        this->cache = new std::unordered_map<std::string, CacheNode*>();
+        this->head = new CacheNode("HEAD", nullptr);
+        this->tail = new CacheNode("TAIL", nullptr);
+        this->head->next_node = this->tail;
+        this->tail->prev_node = this->head;
+    }
+
+    ~LRUCache() {
+        CacheNode* node = head;
+        while (node != nullptr) {
+            CacheNode* next = node->next_node;
+
+            switch (this->ctype) {
+                case CacheType::HRIR:
+                    delete (Hrir*) node->value;
+                    break;
+                case CacheType::RIR:
+                    delete (Morphdata*) node->value;
+                    break;
+                case CacheType::FFT:
+                    delete (FFT*) node->value;
+                    break;
+            }
+
+            delete node;
+            node = next;
+        }
+        delete cache;
+    }
+
+    void put(const std::string& k, void* value) {
+        if (this->cache->contains(k)) {
+            this->move_to_head((*this->cache)[k]);
+        } else {
+            (*this->cache)[k] = new CacheNode(k, value);
+            this->add((*this->cache)[k]);
+        }
+
+        if (this->cache->size() > this->capacity) {
+            CacheNode* lru = this->tail->prev_node;
+            this->remove(lru);
+
+            switch (this->ctype) {
+                case CacheType::HRIR:
+                    delete (Hrir*) lru->value;
+                    break;
+                case CacheType::RIR:
+                    delete (Morphdata*) lru->value;
+                    break;
+                case CacheType::FFT:
+                    delete (FFT*) lru->value;
+                    break;
+            }
+
+            this->cache->erase(lru->key);
+            delete lru;
+        }
+    }
+
+    void* get(const std::string& k) {
+        if (this->cache->contains(k)) {
+           CacheNode* node = (*this->cache)[k];
+           this->move_to_head(node);
+           return node->value;
+        }
+        return nullptr;
+    }
+
+    bool contains(std::string& k) {
+        return this->cache->contains(k);
+    }
+
+private:
+    void remove(CacheNode* node) {
+        CacheNode* prev = node->prev_node;
+        CacheNode* next = node->next_node;
+        prev->next_node = next;
+        next->prev_node = prev;
+    }
+
+    void add(CacheNode* node) {
+        node->next_node = this->head->next_node;
+        node->prev_node = this->head;
+        this->head->next_node->prev_node = node;
+        this->head->next_node = node;
+    }
+
+    void move_to_head(CacheNode* node) {
+        this->remove(node);
+        this->add(node);
+    }
+
+};
+
+struct SpatialNeighs
+{
+    double a_dist;
+    double b_dist;
+    size_t i0;
+    size_t i1;
+};
+
+SpatialNeighs spatial_match(CartesianPoint* target, HrirDatasetRead* dataset);
+void cross_fade(double* prev_kernel, double* current_kernel, double* a, double* b, size_t transition_length);
+void fft_convolve(std::vector<double>* buffer, double* x, double* kernel, size_t x_size, size_t k_size, ConvMode conv_mode);
+
+enum CurveMode
+{
+    LINEAR,
+    SIGMOID,
+    EXPONENTIAL,
+    LOGARITHMIC
+};
+
+struct RirFromDataset
+{
+    std::vector<double> rir;
+    size_t lenght;
+
+    RirFromDataset()
+    : rir(std::vector<double>()), lenght(0)
+    { }
+
+    ~RirFromDataset() = default;
+};
+
+struct Rir
+{
+    std::vector<double> rir;
+    size_t length;
+
+    Rir()
+    : rir(std::vector<double>()), length(0)
+    { }
+
+    Rir(const Rir& r) {
+        this->rir.resize(r.length);
+        memcpy(this->rir.data(), r.rir.data(), sizeof(double) * r.length);
+        this->length = r.length;
+    }
+
+    Rir(double* buffer, size_t channel_length) {
+        this->rir.resize(channel_length);
+        memcpy(this->rir.data(), buffer, sizeof(double) * channel_length);
+        this->length = channel_length;
+    }
+
+    ~Rir() = default;
+};
+
+class RirDatasetRead
+{
+public:
+    H5::H5File rdata;
+    char** ir_keys;
+
+    RirDatasetRead(const char* dataset_path) {
+        this->rdata = H5::H5File(dataset_path, H5F_ACC_RDONLY);
+
+        H5::Attribute keys = this->rdata.openAttribute("IR-keys");
+        H5::StrType string_type(H5::PredType::C_S1, H5T_VARIABLE);
+        string_type.setCset(H5T_CSET_UTF8);
+        string_type.setStrpad(H5T_STR_NULLTERM);
+
+        H5::DataSpace space = keys.getSpace();
+        hsize_t dim[1];
+        space.getSimpleExtentDims(dim);
+        this->ir_keys = new char*[dim[0]];
+        keys.read(string_type, this->ir_keys);
+        this->data_length = dim[0];
+
+        H5::Attribute fs = this->rdata.openAttribute("fs");
+        fs.read(H5::PredType::NATIVE_INT64, &this->sample_rate);
+
+        this->temp_rir = nullptr;
+    }
+
+    ~RirDatasetRead() {
+        for (size_t i = 0; i < this->data_length; ++i) {
+            free(this->ir_keys[i]);
+        }
+        delete[] this->ir_keys;
+        if (this->temp_rir) free(this->temp_rir);
+    }
+
+    void get_rdata(RirFromDataset* rir_buffer, size_t index) {
+        const char* key = this->ir_keys[index];
+        H5::DataSet r = this->rdata.openDataSet(key);
+        H5::DataSpace space = r.getSpace();
+        hsize_t dim[1];
+        space.getSimpleExtentDims(dim);
+
+        double* temp = (double*) realloc(this->temp_rir, sizeof(double) * dim[0]);
+        this->temp_rir = temp;
+        r.read(this->temp_rir, H5::PredType::NATIVE_DOUBLE);
+
+        rir_buffer->rir.resize(dim[0]);
+        rir_buffer->lenght = dim[0];
+        memcpy(rir_buffer->rir.data(), this->temp_rir, sizeof(double) * dim[0]);
+    }
+
+    double get_sample_rate() {
+        return static_cast<double>(this->sample_rate);
+    }
+
+private:
+    size_t data_length;
+    int64_t sample_rate;
+    double* temp_rir;
+};
+
 class ISO9613Filter
 {
 public:
@@ -432,6 +771,8 @@ public:
             this->frequencies[i] = value;
             this->fnorm[i] = value / nyq;
         }
+
+        this->fft_plan_cache = new LRUCache(10, CacheType::FFT);
     }
 
     ~ISO9613Filter() = default;
@@ -480,6 +821,7 @@ private:
     double sample_rate;
     std::vector<double> frequencies;
     std::vector<double> fnorm;
+    LRUCache* fft_plan_cache;
 
     // multiband filter (apply on a single channel Left and Right)
     void multiband_fft_filter(double* frame, double* alpha, size_t frame_size) {
@@ -568,339 +910,6 @@ private:
     std::vector<double> current_delay;
     std::vector<double> delayed_indexes;
     std::vector<double> indexes;
-};
-
-struct SpatialNeighs
-{
-    double a_dist;
-    double b_dist;
-    size_t i0;
-    size_t i1;
-};
-
-SpatialNeighs spatial_match(CartesianPoint* target, HrirDatasetRead* dataset);
-void cross_fade(double* prev_kernel, double* current_kernel, double* a, double* b, size_t transition_length);
-void fft_convolve(std::vector<double>* buffer, double* x, double* kernel, size_t x_size, size_t k_size, ConvMode conv_mode);
-
-struct Morphdata
-{
-    fftw_complex* source_a;
-    fftw_complex* source_b;
-    fftw_complex* morphed;
-    double smooth_factor;
-    size_t lenght;
-    size_t fftw_length;
-    fftw_complex* ifft_in;
-    std::vector<double> out_morphed;
-    fftw_plan pifft;
-
-    Morphdata()
-    : source_a(nullptr),
-    source_b(nullptr),
-    morphed(nullptr),
-    smooth_factor(0.0),
-    lenght(0),
-    fftw_length(0),
-    ifft_in(nullptr),
-    out_morphed(std::vector<double>()),
-    pifft(nullptr)
-    { }
-
-    Morphdata(const Morphdata& other) {
-        this->lenght = other.lenght;
-        this->smooth_factor = other.smooth_factor;
-        this->fftw_length = other.fftw_length;
-
-        this->source_a = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * this->fftw_length);
-        this->source_b = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * this->fftw_length);
-        this->morphed = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * this->fftw_length);
-
-        memcpy(this->source_a, other.source_a, sizeof(fftw_complex) * this->fftw_length);
-        memcpy(this->source_b, other.source_b, sizeof(fftw_complex) * this->fftw_length);
-        memcpy(this->morphed, other.morphed, sizeof(fftw_complex) * this->fftw_length);
-
-        this->ifft_in = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * this->fftw_length);
-        this->out_morphed = std::vector<double>(this->lenght, 0.0);
-        this->pifft = fftw_plan_dft_c2r_1d(this->lenght, this->ifft_in, this->out_morphed.data(), FFTW_ESTIMATE);
-    }
-
-    ~Morphdata() {
-        fftw_free(this->source_a);
-        fftw_free(this->source_b);
-        fftw_free(this->morphed);
-        fftw_free(this->ifft_in);
-        this->ifft_in = nullptr;
-        fftw_destroy_plan(this->pifft);
-    }
-
-    void execute_ifft(fftw_complex* x_ifft) {
-        memcpy(this->ifft_in, x_ifft, sizeof(fftw_complex) * this->fftw_length);
-        fftw_execute(this->pifft);
-    }
-};
-
-enum FFT_DIRECTION
-{
-    FORWARD,
-    BACKWARD
-};
-
-class FFT
-{
-public:
-    size_t fft_length;
-    size_t half_size;
-    fftw_complex* complex_data;
-    std::vector<double> real_data;
-    fftw_plan pfft;
-    fftw_plan pifft;
-
-    FFT(size_t n)
-    : fft_length(n), half_size(n / 2 + 1)
-    {
-        this->complex_data = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * this->half_size);
-        this->real_data = std::vector<double>(this->fft_length);
-        this->pifft = fftw_plan_dft_c2r_1d(this->fft_length, this->complex_data, this->real_data.data(), FFTW_ESTIMATE);
-        this->pfft = fftw_plan_dft_r2c_1d(this->fft_length, this->real_data.data(), this->complex_data, FFTW_ESTIMATE);
-    }
-
-    ~FFT() {
-        fftw_free(this->complex_data);
-        fftw_destroy_plan(this->pfft);
-        fftw_destroy_plan(this->pifft);
-    }
-
-    void transform(void* data, FFT_DIRECTION direction) {
-        switch (direction) {
-            case FFT_DIRECTION::FORWARD:
-                memcpy(this->real_data.data(), (double*) data, sizeof(double) * this->fft_length);
-                fftw_execute(this->pfft);
-                break;
-            case FFT_DIRECTION::BACKWARD:
-                memcpy(this->complex_data, (fftw_complex*) data, sizeof(fftw_complex*) * this->half_size);
-                fftw_execute(this->pifft);
-                break;
-        }
-    }
-};
-
-struct CacheNode
-{
-public:
-    std::string key;
-    void* value;
-    CacheNode* prev_node;
-    CacheNode* next_node;
-
-    CacheNode(const std::string& key_, void* value_)
-    : key(key_), value(value_), prev_node(nullptr), next_node(nullptr)
-    { }
-};
-
-class LRUCache
-{
-public:
-    size_t capacity;
-    CacheType ctype;
-    std::unordered_map<std::string, CacheNode*>* cache;
-    CacheNode* head;
-    CacheNode* tail;
-
-    LRUCache(size_t cache_size, CacheType cache_type) {
-        this->capacity = cache_size;
-        this->ctype = cache_type;
-        this->cache = new std::unordered_map<std::string, CacheNode*>();
-        this->head = new CacheNode("HEAD", nullptr);
-        this->tail = new CacheNode("TAIL", nullptr);
-        this->head->next_node = this->tail;
-        this->tail->prev_node = this->head;
-    }
-
-    ~LRUCache() {
-        CacheNode* node = head;
-        while (node != nullptr) {
-            CacheNode* next = node->next_node;
-
-            switch (this->ctype) {
-                case CacheType::HRIR:
-                    delete (Hrir*) node->value;
-                    break;
-                case CacheType::RIR:
-                    delete (Morphdata*) node->value;
-                    break;
-            }
-
-            delete node;
-            node = next;
-        }
-        delete cache;
-    }
-
-    void put(const std::string& k, void* value) {
-        if (this->cache->contains(k)) {
-            this->move_to_head((*this->cache)[k]);
-        } else {
-            (*this->cache)[k] = new CacheNode(k, value);
-            this->add((*this->cache)[k]);
-        }
-
-        if (this->cache->size() > this->capacity) {
-            CacheNode* lru = this->tail->prev_node;
-            this->remove(lru);
-
-            switch (this->ctype) {
-                case CacheType::HRIR:
-                    delete (Hrir*) lru->value;
-                    break;
-                case CacheType::RIR:
-                    delete (Morphdata*) lru->value;
-                    break;
-            }
-
-            this->cache->erase(lru->key);
-            delete lru;
-        }
-    }
-
-    void* get(const std::string& k) {
-        if (this->cache->contains(k)) {
-           CacheNode* node = (*this->cache)[k];
-           this->move_to_head(node);
-           return node->value;
-        }
-        return nullptr;
-    }
-
-    bool contains(std::string& k) {
-        return this->cache->contains(k);
-    }
-
-private:
-    void remove(CacheNode* node) {
-        CacheNode* prev = node->prev_node;
-        CacheNode* next = node->next_node;
-        prev->next_node = next;
-        next->prev_node = prev;
-    }
-
-    void add(CacheNode* node) {
-        node->next_node = this->head->next_node;
-        node->prev_node = this->head;
-        this->head->next_node->prev_node = node;
-        this->head->next_node = node;
-    }
-
-    void move_to_head(CacheNode* node) {
-        this->remove(node);
-        this->add(node);
-    }
-
-};
-
-enum CurveMode
-{
-    LINEAR,
-    SIGMOID,
-    EXPONENTIAL,
-    LOGARITHMIC
-};
-
-struct RirFromDataset
-{
-    std::vector<double> rir;
-    size_t lenght;
-
-    RirFromDataset()
-    : rir(std::vector<double>()), lenght(0)
-    { }
-
-    ~RirFromDataset() = default;
-};
-
-struct Rir
-{
-    std::vector<double> rir;
-    size_t length;
-
-    Rir()
-    : rir(std::vector<double>()), length(0)
-    { }
-
-    Rir(const Rir& r) {
-        this->rir.resize(r.length);
-        memcpy(this->rir.data(), r.rir.data(), sizeof(double) * r.length);
-        this->length = r.length;
-    }
-
-    Rir(double* buffer, size_t channel_length) {
-        this->rir.resize(channel_length);
-        memcpy(this->rir.data(), buffer, sizeof(double) * channel_length);
-        this->length = channel_length;
-    }
-
-    ~Rir() = default;
-};
-
-
-class RirDatasetRead
-{
-public:
-    H5::H5File rdata;
-    char** ir_keys;
-
-    RirDatasetRead(const char* dataset_path) {
-        this->rdata = H5::H5File(dataset_path, H5F_ACC_RDONLY);
-
-        H5::Attribute keys = this->rdata.openAttribute("IR-keys");
-        H5::StrType string_type(H5::PredType::C_S1, H5T_VARIABLE);
-        string_type.setCset(H5T_CSET_UTF8);
-        string_type.setStrpad(H5T_STR_NULLTERM);
-
-        H5::DataSpace space = keys.getSpace();
-        hsize_t dim[1];
-        space.getSimpleExtentDims(dim);
-        this->ir_keys = new char*[dim[0]];
-        keys.read(string_type, this->ir_keys);
-        this->data_length = dim[0];
-
-        H5::Attribute fs = this->rdata.openAttribute("fs");
-        fs.read(H5::PredType::NATIVE_INT64, &this->sample_rate);
-
-        this->temp_rir = nullptr;
-    }
-
-    ~RirDatasetRead() {
-        for (size_t i = 0; i < this->data_length; ++i) {
-            free(this->ir_keys[i]);
-        }
-        delete[] this->ir_keys;
-        if (this->temp_rir) free(this->temp_rir);
-    }
-
-    void get_rdata(RirFromDataset* rir_buffer, size_t index) {
-        const char* key = this->ir_keys[index];
-        H5::DataSet r = this->rdata.openDataSet(key);
-        H5::DataSpace space = r.getSpace();
-        hsize_t dim[1];
-        space.getSimpleExtentDims(dim);
-
-        double* temp = (double*) realloc(this->temp_rir, sizeof(double) * dim[0]);
-        this->temp_rir = temp;
-        r.read(this->temp_rir, H5::PredType::NATIVE_DOUBLE);
-
-        rir_buffer->rir.resize(dim[0]);
-        rir_buffer->lenght = dim[0];
-        memcpy(rir_buffer->rir.data(), this->temp_rir, sizeof(double) * dim[0]);
-    }
-
-    double get_sample_rate() {
-        return static_cast<double>(this->sample_rate);
-    }
-
-private:
-    size_t data_length;
-    int64_t sample_rate;
-    double* temp_rir;
 };
 
 struct OSABuffer
