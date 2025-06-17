@@ -137,11 +137,8 @@ public:
             y_spectrum[i][1] = sx * md->source_a[i][1] + cx * md->morphed[i][1] + dx * md->source_b[i][1];
         }
 
-        std::vector<double> temp_morphed(md->lenght, 0.0);
-        fftw_plan p = fftw_plan_dft_c2r_1d(md->lenght, y_spectrum, temp_morphed.data(), FFTW_MEASURE);
-
-        fftw_execute(p);
-        fftw_destroy_plan(p);
+        md->execute_ifft(y_spectrum);
+        std::vector<double> temp_morphed = md->out_morphed;
         fftw_free(y_spectrum);
 
         auto max_morphed_it = std::max_element(

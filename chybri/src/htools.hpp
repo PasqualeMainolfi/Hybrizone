@@ -432,7 +432,6 @@ public:
             this->frequencies[i] = value;
             this->fnorm[i] = value / nyq;
         }
-
     }
 
     ~ISO9613Filter() = default;
@@ -591,9 +590,20 @@ struct Morphdata
     double smooth_factor;
     size_t lenght;
     size_t fftw_length;
+    fftw_complex* ifft_in;
+    std::vector<double> out_morphed;
+    fftw_plan pifft;
 
     Morphdata()
-    : source_a(nullptr), source_b(nullptr), morphed(nullptr), smooth_factor(0.0), lenght(0), fftw_length(0)
+    : source_a(nullptr),
+    source_b(nullptr),
+    morphed(nullptr),
+    smooth_factor(0.0),
+    lenght(0),
+    fftw_length(0),
+    ifft_in(nullptr),
+    out_morphed(std::vector<double>()),
+    pifft(nullptr)
     { }
 
     Morphdata(const Morphdata& other) {
@@ -609,12 +619,23 @@ struct Morphdata
         memcpy(this->source_b, other.source_b, sizeof(fftw_complex) * this->fftw_length);
         memcpy(this->morphed, other.morphed, sizeof(fftw_complex) * this->fftw_length);
 
+        this->ifft_in = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * this->fftw_length);
+        this->out_morphed = std::vector<double>(this->lenght, 0.0);
+        this->pifft = fftw_plan_dft_c2r_1d(this->lenght, this->ifft_in, this->out_morphed.data(), FFTW_ESTIMATE);
     }
 
     ~Morphdata() {
         fftw_free(this->source_a);
         fftw_free(this->source_b);
         fftw_free(this->morphed);
+        fftw_free(this->ifft_in);
+        this->ifft_in = nullptr;
+        fftw_destroy_plan(this->pifft);
+    }
+
+    void execute_ifft(fftw_complex* x_ifft) {
+        memcpy(this->ifft_in, x_ifft, sizeof(fftw_complex) * this->fftw_length);
+        fftw_execute(this->pifft);
     }
 };
 
