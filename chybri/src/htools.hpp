@@ -33,6 +33,7 @@
 #define MAX_TRANSITION_SAMPLES (512)
 #define SOFT_CLIP_FACTOR (1.0 / 0.707)
 #define MAX_OSA_BUFFER_SIZE (22050)
+#define EPSILON (1e-9)
 
 
 inline void from_interleaved_to_single(double* interleaved, double* a, double* b, size_t out_size) {
@@ -155,7 +156,7 @@ public:
 
     CartesianPoint normalize() {
         double norm = std::hypot(this->x, this->y, this->z);
-        if (norm > 1e-10) {
+        if (norm > EPSILON) {
             return CartesianPoint(this->x / norm, this->y / norm, this->z / norm);
         }
         return CartesianPoint(0.0, 0.0, 0.0);

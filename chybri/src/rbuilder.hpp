@@ -109,7 +109,7 @@ public:
 
             for (size_t i = 0; i < fftw_size; ++i) {
                 std::complex<double> target_flatten(md.source_b[i][0], md.source_b[i][1]);
-                target_flatten = (target_flatten / (tcep[i] + 1e-12)) * scep[i];
+                target_flatten = (target_flatten / (tcep[i] + EPSILON)) * scep[i];
                 md.morphed[i][0] = target_flatten.real();
                 md.morphed[i][1] = target_flatten.imag();
             }
@@ -196,7 +196,7 @@ private:
             std::complex<double> z(x[i][0], x[i][1]);
             double mag = std::abs(z);
             mag_max = std::max(mag_max, mag);
-            db[i][0] = std::log10(mag + 1e-12);
+            db[i][0] = std::log10(mag + EPSILON);
             db[i][1] = 0.0;
         }
 
@@ -246,7 +246,7 @@ private:
         );
 
         double max_rc = std::abs(*max_smooth_it);
-        double scale_factor = mag_max / (max_rc + 1e-12);
+        double scale_factor = mag_max / (max_rc + EPSILON);
         std::transform(
             rc_smoothed.begin(), rc_smoothed.begin() + fft_size, rc_smoothed.begin(), [&scale_factor](double x) {
                 return x * scale_factor;
