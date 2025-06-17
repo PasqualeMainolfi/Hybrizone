@@ -105,7 +105,7 @@ enum ConvMode
     SAME
 };
 
-enum CacheType
+enum class CacheType
 {
     HRIR,
     RIR,
@@ -829,17 +829,20 @@ private:
         double step = 1.0 / static_cast<double>(half_size - 1);
 
         std::vector<double> ftemp(half_size, 0.0);
-        for (size_t i = 0; i < half_size; ++i) {
-            ftemp[i] = step * (double) i;
-        }
+        for (size_t i = 0; i < half_size; ++i) ftemp[i] = step * (double) i;
 
         std::vector<double> fresp(half_size, 0.0);
         lerp(this->fnorm.data(), alpha, ftemp.data(), fresp.data(), NFREQS, half_size, false);
 
+        std::string cache_key = std::format("{}", frame_size);
+        if (!this->fft_plan_cache->contains(cache_key)) {
+            this->fft_plan_cache->put(cache_key, (FFT*) new FFT(frame_size));
+        }
+
+        FFT* p = (FFT*) this->fft_plan_cache->get(cache_key);
+        p->transform((double*) frame, FFT_DIRECTION::FORWARD);
         fftw_complex* temp_fft = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * half_size);
-        fftw_plan fft_plan = fftw_plan_dft_r2c_1d(frame_size, frame, temp_fft, FFTW_ESTIMATE);
-        fftw_execute(fft_plan);
-        fftw_destroy_plan(fft_plan);
+        memcpy(temp_fft, p->complex_data, sizeof(fftw_complex) * half_size);
 
         for (size_t i = 0; i < half_size; ++i) {
             double att = fresp[i];
@@ -847,18 +850,11 @@ private:
             temp_fft[i][1] *= att;
         }
 
-        fftw_plan ifft_plan = fftw_plan_dft_c2r_1d(frame_size, temp_fft, frame, FFTW_ESTIMATE);
-
-        fftw_execute(ifft_plan);
-        fftw_destroy_plan(ifft_plan);
-
-        for (size_t i = 0; i < frame_size; ++i) {
-            frame[i] /= static_cast<double>(frame_size);
-        }
+        p->transform((fftw_complex*) temp_fft, FFT_DIRECTION::BACKWARD);
+        for (size_t i = 0; i < frame_size; ++i) frame[i] = p->real_data[i] / static_cast<double>(frame_size);
 
         fftw_free(temp_fft);
     }
-
 };
 
 class GeometricAttenuation
