@@ -141,18 +141,13 @@ public:
         std::vector<double> temp_morphed = md->out_morphed;
         fftw_free(y_spectrum);
 
-        auto max_morphed_it = std::max_element(
+        double max_morphed = *std::max_element(
             temp_morphed.begin(), temp_morphed.end(), [](double a, double b) {
                 return std::abs(a) < std::abs(b);
             }
         );
 
-        double max_morphed = *max_morphed_it;
-        std::transform(
-            temp_morphed.begin(), temp_morphed.end(), temp_morphed.begin(), [max_morphed](double x) {
-                return x / max_morphed;
-            }
-        );
+        for (auto& val : temp_morphed) val /= max_morphed;
 
         this->apply_distance(temp_morphed.data(), distance, md->lenght);
         std::vector<double> current_temp = temp_morphed;
@@ -190,8 +185,7 @@ private:
         fftw_complex* db = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * fft_size);
         double mag_max = std::abs(std::complex<double>(x[0][0], x[0][1]));
         for (size_t i = 0; i < fft_size; ++i) {
-            std::complex<double> z(x[i][0], x[i][1]);
-            double mag = std::abs(z);
+            double mag = std::hypot(x[i][0], x[i][1]);
             mag_max = std::max(mag_max, mag);
             db[i][0] = std::log10(mag + EPSILON);
             db[i][1] = 0.0;
@@ -202,55 +196,35 @@ private:
         fftw_execute(ifft);
         fftw_destroy_plan(ifft);
 
-        std::transform(
-            rc.begin(), rc.end(), rc.begin(), [&frame_size](double x) {
-                return x / static_cast<double>(frame_size);
-            }
-        );
+        for (auto& val : rc) val /= static_cast<double>(frame_size);
 
-        fftw_complex* realcep = (fftw_complex*) malloc(sizeof(fftw_complex) * fft_size);
+        fftw_complex* realcep = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * fft_size);
         fftw_plan fft = fftw_plan_dft_r2c_1d(frame_size, rc.data(), realcep, FFTW_ESTIMATE);
         fftw_execute(fft);
         fftw_destroy_plan(fft);
 
         std::vector<double> realcep_real(fft_size, 1.0);
         for (size_t i = 0; i < fft_size; ++i) realcep_real[i] = realcep[i][0];
-
         fftw_free(realcep);
 
         double rc_mean = std::accumulate(realcep_real.begin(), realcep_real.end(), 0.0) / static_cast<double>(fft_size);
-        std::transform(
-            realcep_real.begin(), realcep_real.end(), realcep_real.begin(), [&rc_mean](double x) {
-                return std::exp(x - rc_mean);
-            }
-        );
+        for (auto& val : realcep_real) val = std::exp(val - rc_mean);
 
         size_t kernel_length = static_cast<size_t>(fft_size * smooth_factor);
         std::vector<double> smooth_kernel(kernel_length, 1.0);
-        std::transform(
-            smooth_kernel.begin(), smooth_kernel.end(), smooth_kernel.begin(), [&kernel_length](double x) {
-                return x / static_cast<double>(kernel_length);
-            }
-        );
+        for (size_t i = 0; i < kernel_length; ++i) smooth_kernel[i] = static_cast<double>(i) / static_cast<double>(kernel_length);
 
         std::vector<double> rc_smoothed;
         fft_convolve(&rc_smoothed, realcep_real.data(), smooth_kernel.data(), fft_size, kernel_length, ConvMode::SAME);
 
-        auto max_smooth_it = std::max_element(
+        double max_smooth = *std::max_element(
             rc_smoothed.begin(), rc_smoothed.end(), [](double a, double b) {
                 return std::abs(a) < std::abs(b);
             }
         );
 
-        double max_rc = std::abs(*max_smooth_it);
-        double scale_factor = mag_max / (max_rc + EPSILON);
-        std::transform(
-            rc_smoothed.begin(), rc_smoothed.begin() + fft_size, rc_smoothed.begin(), [&scale_factor](double x) {
-                return x * scale_factor;
-            }
-        );
-
-        memcpy(y, rc_smoothed.data(), sizeof(double) * fft_size);
+        double scale_factor = mag_max / (max_smooth + EPSILON);
+        for (size_t i = 0; i < fft_size; ++i) y[i] = rc_smoothed[i] * scale_factor;
     }
 
     double non_linear_morph_curve(double direction, CurveMode curve_mode) {
@@ -277,11 +251,7 @@ private:
         factor = factor > 1.0 ? 1.0 : factor;
         double d = distance - std::max(this->source_distance, ETA);
         this->iso9613->air_absorption_filter(x, this->db_attenuation.data(), d, frame_length);
-        std::transform(
-            x, x + frame_length, x, [&factor](double x) {
-                return x * factor;
-            }
-        );
+        for (size_t i = 0; i < frame_length; ++i) x[i] *= factor;
     }
 
     void get_fft(double* x, fftw_complex* y, size_t length) {

@@ -107,15 +107,11 @@ void fft_convolve(std::vector<double>* buffer, double* x, double* kernel, size_t
         ifft_in[i][1] = c.imag();
     }
 
-    double* ifft_out = (double*) malloc(sizeof(double) * conv_size);
-    fftw_plan pifft = fftw_plan_dft_c2r_1d(conv_size, ifft_in, ifft_out, FFTW_ESTIMATE);
+    std::vector<double> ifft_out(conv_size, 0.0);
+    fftw_plan pifft = fftw_plan_dft_c2r_1d(conv_size, ifft_in, ifft_out.data(), FFTW_ESTIMATE);
     fftw_execute(pifft);
 
-    std::transform(
-        ifft_out, ifft_out + conv_size, ifft_out, [&conv_size](double x) {
-            return x / static_cast<double>(conv_size);
-        }
-    );
+    for (auto& val : ifft_out) val /= static_cast<double>(conv_size);
 
     size_t length = conv_size;
     size_t offset = 0;
@@ -125,7 +121,7 @@ void fft_convolve(std::vector<double>* buffer, double* x, double* kernel, size_t
     }
 
     buffer->resize(length);
-    memcpy(buffer->data(), ifft_out + offset, sizeof(double) * length);
+    memcpy(buffer->data(), ifft_out.data() + offset, sizeof(double) * length);
 
     fftw_destroy_plan(px);
     fftw_destroy_plan(pk);
@@ -133,7 +129,6 @@ void fft_convolve(std::vector<double>* buffer, double* x, double* kernel, size_t
     fftw_free(xfft);
     fftw_free(kfft);
     fftw_free(ifft_in);
-    free(ifft_out);
 }
 
 void intermediate_segment(double* buffer, double* x, double* prev_kernel, double* curr_kernel, size_t ksize, size_t transition_size) {
@@ -170,8 +165,5 @@ void apply_intermediate(OSABuffer* osa_buffer, double* x, std::vector<double> pr
     fft_convolve(&rest_part, xtemp.data(), kcurr.data(), x_rest_size, ksize, ConvMode::FULL);
 
     size_t x_rest_conv_size = x_rest_size + ksize - 1;
-
-    for (size_t i = 0; i < x_rest_conv_size; ++i) {
-        osa_buffer->buffer[i + transition_length] += rest_part[i];
-    }
+    for (size_t i = 0; i < x_rest_conv_size; ++i) osa_buffer->buffer[i + transition_length] += rest_part[i];
 }
