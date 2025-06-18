@@ -29,6 +29,7 @@
 #define INTERNAL_KERNEL_TRANSITION  (0.003)
 #define CHANNELS (2)
 #define CACHE_CAPACITY (4096)
+#define FFT_CACHE_CAPACITY (24)
 #define OSA_TRANSITION_FACTOR (0.5)
 #define MAX_TRANSITION_SAMPLES (512)
 #define SOFT_CLIP_FACTOR (1.0 / 0.707)
@@ -772,7 +773,7 @@ public:
             this->fnorm[i] = value / nyq;
         }
 
-        this->fft_plan_cache = new LRUCache(10, CacheType::FFT);
+        this->fft_plan_cache = new LRUCache(FFT_CACHE_CAPACITY, CacheType::FFT);
     }
 
     ~ISO9613Filter() = default;

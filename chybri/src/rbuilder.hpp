@@ -47,6 +47,8 @@ public:
             this->cross_fade_coeff_a[i] = std::cos(alpha);
             this->cross_fade_coeff_b[i] = std::sin(alpha);
         }
+
+        this->fft_plan_cache = new LRUCache(FFT_CACHE_CAPACITY, CacheType::FFT);
     }
 
     ~RBuilder() {
@@ -54,6 +56,7 @@ public:
         delete this->cache;
         delete this->iso9613;
         delete this->geometric_attenuation;
+        delete this->fft_plan_cache;
     }
 
     void set_air_condition(AirData* air_data) {
@@ -98,8 +101,20 @@ public:
             md.lenght = rir_size;
             md.fftw_length = fftw_size;
 
-            this->get_fft(rir_a.rir.data(), md.source_a, rir_size);
-            this->get_fft(rir_b.rir.data(), md.source_b, rir_size);
+            std::string cache_key = std::format("{}", rir_size);
+            if (!this->fft_plan_cache->contains(cache_key)) {
+                this->fft_plan_cache->put(cache_key, (FFT*) new FFT(rir_size));
+            }
+
+            FFT* p = (FFT*) this->fft_plan_cache->get(cache_key);
+
+            p->transform((double*) rir_a.rir.data(), FFT_DIRECTION::FORWARD);
+            memcpy(md.source_a, p->complex_data, sizeof(fftw_complex) * fftw_size);
+            p->transform((double*) rir_b.rir.data(), FFT_DIRECTION::FORWARD);
+            memcpy(md.source_b, p->complex_data, sizeof(fftw_complex) * fftw_size);
+
+            // this->get_fft(rir_a.rir.data(), md.source_a, rir_size);
+            // this->get_fft(rir_b.rir.data(), md.source_b, rir_size);
 
             std::vector<double> scep(fftw_size, 0.0);
             this->get_spectral_envelope(md.source_a, scep.data(), rir_size, fftw_size, smooth_factor);
@@ -180,6 +195,7 @@ private:
     size_t cross_fade_length;
     std::vector<double> cross_fade_coeff_a;
     std::vector<double> cross_fade_coeff_b;
+    LRUCache* fft_plan_cache;
 
     void get_spectral_envelope(fftw_complex* x, double* y, size_t frame_size, size_t fft_size, double smooth_factor) {
         fftw_complex* db = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * fft_size);
@@ -191,28 +207,29 @@ private:
             db[i][1] = 0.0;
         }
 
-        std::vector<double> rc(frame_size, 0.0);
-        fftw_plan ifft = fftw_plan_dft_c2r_1d(frame_size, db, rc.data(), FFTW_ESTIMATE);
-        fftw_execute(ifft);
-        fftw_destroy_plan(ifft);
+        std::string cache_key = std::format("{}", frame_size);
+        if (!this->fft_plan_cache->contains(cache_key)) {
+            this->fft_plan_cache->put(cache_key, (FFT*) new FFT(frame_size));
+        }
 
-        for (auto& val : rc) val /= static_cast<double>(frame_size);
+        FFT* p = (FFT*) this->fft_plan_cache->get(cache_key);
 
-        fftw_complex* realcep = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * fft_size);
-        fftw_plan fft = fftw_plan_dft_r2c_1d(frame_size, rc.data(), realcep, FFTW_ESTIMATE);
-        fftw_execute(fft);
-        fftw_destroy_plan(fft);
+        p->transform((fftw_complex*) db, FFT_DIRECTION::BACKWARD);
 
-        std::vector<double> realcep_real(fft_size, 1.0);
-        for (size_t i = 0; i < fft_size; ++i) realcep_real[i] = realcep[i][0];
-        fftw_free(realcep);
+        for (auto& val : p->real_data) val /= static_cast<double>(frame_size);
+        std::vector<double> rc(frame_size);
+        memcpy(rc.data(), p->real_data.data(), sizeof(double) * frame_size);
+
+        p->transform((double*) rc.data(), FFT_DIRECTION::FORWARD);
+
+        std::vector<double> realcep_real(fft_size);
+        for (size_t i = 0; i < fft_size; ++i) realcep_real[i] = p->complex_data[i][0];
 
         double rc_mean = std::accumulate(realcep_real.begin(), realcep_real.end(), 0.0) / static_cast<double>(fft_size);
         for (auto& val : realcep_real) val = std::exp(val - rc_mean);
 
         size_t kernel_length = static_cast<size_t>(fft_size * smooth_factor);
-        std::vector<double> smooth_kernel(kernel_length, 1.0);
-        for (size_t i = 0; i < kernel_length; ++i) smooth_kernel[i] = static_cast<double>(i) / static_cast<double>(kernel_length);
+        std::vector<double> smooth_kernel(kernel_length, 1.0 / static_cast<double>(kernel_length));
 
         std::vector<double> rc_smoothed;
         fft_convolve(&rc_smoothed, realcep_real.data(), smooth_kernel.data(), fft_size, kernel_length, ConvMode::SAME);
@@ -225,6 +242,8 @@ private:
 
         double scale_factor = mag_max / (max_smooth + EPSILON);
         for (size_t i = 0; i < fft_size; ++i) y[i] = rc_smoothed[i] * scale_factor;
+
+        fftw_free(db);
     }
 
     double non_linear_morph_curve(double direction, CurveMode curve_mode) {
