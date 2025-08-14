@@ -108,7 +108,7 @@ class HRIRBuilder():
         
         check_itd_distance = True if hrirs_info.target.rho < self.dataset.get_source_distance() else False
         gfac = hrirs_info.target.rho - self.source_distance
-        gfac = gfac if gfac > 0 else 0
+        gfac = gfac if gfac > 0 else 0 
         gain = -self.db_attenuation * gfac
 
         min_arg = np.argmin(hrirs_info.distances)
@@ -263,7 +263,7 @@ class HRIRBuilder():
         neighs = neighs if neighs >= 2 else 2
         
         point.rho = max(point.rho, ETA)
-        point_hash = point._get_hash()
+        point_hash = point._get_hash(temp=self.iso9613.air_data.kelvin, hum=self.iso9613.air_data.humidity, pres=self.iso9613.air_data.pressure)
         
         if self.__cache_hrir_builded.get(key=point_hash) is not None:
             return HInfo(point_hash=point_hash)
@@ -334,7 +334,7 @@ class HRIRBuilder():
             
         self.__prev_dist_hrir = dhrir_
         self.__prev_distance = hrirs_info.target.rho
-        point_hash = hrirs_info.target._get_hash()
+        point_hash = hrirs_info.target._get_hash(temp=self.iso9613.air_data.kelvin, hum=self.iso9613.air_data.humidity, pres=self.iso9613.air_data.pressure)
         interpolated.hrir = dhrir_
         self.__cache_hrir_builded.put(key=point_hash, value=interpolated)
         interpolated.hrir = dhrir

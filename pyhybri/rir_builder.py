@@ -82,7 +82,7 @@ class RIRMorpha():
             spectral envelope smooth factor, by default 0.1
         """
         
-        self.__current_key = hashlib.md5(f"{rir1}_{rir2}_{smooth_factor}".encode()).hexdigest()
+        self.__current_key = hashlib.md5(f"{rir1}_{rir2}_{smooth_factor}_{self.iso9613.air_data.kelvin}_{self.iso9613.air_data.humidity}_{self.iso9613.air_data.pressure}".encode()).hexdigest()
         
         if self.__cache_rir_builded.get(key=self.__current_key) is None:
             k1 = self.dataset.attrs["IR-keys"][rir1]

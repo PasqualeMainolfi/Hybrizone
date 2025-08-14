@@ -98,8 +98,8 @@ class PolarPoint():
         
         return CartesianPoint(x=x, y=y, z=z)
     
-    def _get_hash(self):
-        return hashlib.md5(f"{self.rho}_{self.phi}_{self.theta}".encode()).hexdigest()
+    def _get_hash(self, temp: float, hum: float, pres: float):
+        return hashlib.md5(f"{self.rho}_{self.phi}_{self.theta}_{temp}_{hum}_{pres}".encode()).hexdigest()
 
 class RData():
     def __init__(self, rir1: int, rir2: int, smooth_factor: float, source1: NDArray[np.complex64], source2: NDArray[np.complex64], morphed: NDArray[np.complex64]) -> None:
