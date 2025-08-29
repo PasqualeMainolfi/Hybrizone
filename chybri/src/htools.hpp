@@ -208,8 +208,8 @@ public:
         return CartesianPoint(x, y, z);
     }
 
-    std::string get_polar_key() {
-        return std::format("{:.5f}_{:.5f}_{:.5f}", this->rho, this->phi, this->theta);
+    std::string get_polar_key(double temp, double hum, double pres) {
+        return std::format("{:.5f}_{:.5f}_{:.5f}_{:.5f}_{:.5f}_{:.5f}", this->rho, this->phi, this->theta, temp, hum, pres);
     }
 
 };

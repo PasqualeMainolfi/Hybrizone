@@ -146,7 +146,7 @@ public:
         this->hinfo = new HInfo();
         p->rho = std::max(p->rho, ETA);
 
-        std::string temp_key_ = p->get_polar_key();
+        std::string temp_key_ = p->get_polar_key(this->iso9613->air_data->kelvin, this->iso9613->air_data->rh, this->iso9613->air_data->p_atm);
 
         if (this->cache->contains(temp_key_)) {
             this->hinfo->key = temp_key_;
@@ -213,7 +213,10 @@ public:
             this->prev_right_channel = target_right;
             this->prev_distance = this->hinfo->target.rho;
 
-            this->cache->put(this->hinfo->target.get_polar_key(), (Hrir*) new Hrir(target_left.data(), target_right.data(), this->hsize));
+            this->cache->put(
+                this->hinfo->target.get_polar_key(this->iso9613->air_data->kelvin, this->iso9613->air_data->rh, this->iso9613->air_data->p_atm),
+                (Hrir*) new Hrir(target_left.data(), target_right.data(), this->hsize)
+            );
         }
     }
 

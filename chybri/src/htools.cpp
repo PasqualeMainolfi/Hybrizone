@@ -141,7 +141,15 @@ void intermediate_segment(double* buffer, double* x, double* prev_kernel, double
     }
 }
 
-void apply_intermediate(OSABuffer* osa_buffer, double* x, std::vector<double> prev_kernel, std::vector<double> curr_kernel, size_t x_length, size_t prev_kernel_length, size_t curr_kernel_length, size_t transition_length) {
+void apply_intermediate(
+    OSABuffer* osa_buffer, double* x,
+    std::vector<double> prev_kernel,
+    std::vector<double> curr_kernel,
+    size_t x_length,
+    size_t prev_kernel_length,
+    size_t curr_kernel_length,
+    size_t transition_length
+) {
     if (prev_kernel_length <= 0) {
         fft_convolve(&osa_buffer->buffer, x, curr_kernel.data(), x_length, curr_kernel_length, ConvMode::FULL);
         osa_buffer->conv_buffer_size = x_length + curr_kernel_length - 1;

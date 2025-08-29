@@ -66,7 +66,7 @@ public:
     }
 
     void set_rirs(size_t index_a, size_t index_b, double smooth_factor) {
-        this->current_cache_key = std::format("{}:{}:{}", index_a, index_b, smooth_factor);
+        this->current_cache_key = std::format("{}:{}:{}:{:.5f}:{:.5f}:{:.5f}", index_a, index_b, smooth_factor, this->iso9613->air_data->kelvin, this->iso9613->air_data->rh, this->iso9613->air_data->p_atm);
 
         if (!this->cache->contains(this->current_cache_key)) {
             RirFromDataset rir_a;
