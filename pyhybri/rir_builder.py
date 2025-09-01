@@ -33,7 +33,7 @@ def get_morphed_data(curve_value: float, source1: NDArray[np.complex64], source2
     return sx * source1 + cx * morphed + dx * source2
 
 class RIRMorpha():
-    def __init__(self, rir_database_path: str, source_distance: float):
+    def __init__(self, rir_database_path: str, source_distance: float, gamma: float):
         """
         Parameters
         ----------
@@ -49,7 +49,7 @@ class RIRMorpha():
         self.db_attenuation = None
         self.source_distance = source_distance
         
-        self.geometric_attenuation = GeometricAttenuation(fs=self.fs, channels=1)
+        self.geometric_attenuation = GeometricAttenuation(fs=self.fs, channels=1, gamma=gamma)
         
         self.__cache_rir_builded = LRUCache[RData](capacity=LRU_CAPACITY)
         self.__current_key = None

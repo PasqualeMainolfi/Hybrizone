@@ -37,21 +37,29 @@ class BuildMode(Enum):
     INVERSE_DISTANCE = 1
     LINEAR_INVERSE_DISTANCE = 2
     LINEAR = 3
-    SPHERICAL = 4
-    
+    SLERPL = 4
+
 class InterpolationDomain(Enum):
     TIME = 0
     FREQUENCY = 1
-
+        
 class CartesianPoint():
     def __init__(self, x: float, y: float, z: float):
         self.x = x
         self.z = z
         self.y = y
+        
+    def to_polar(self):
+        rho = np.sqrt(self.x * self.x + self.y * self.y + self.z * self.z)
+        rho = max(rho, ETA)
+        phi = np.arcsin(self.z / rho)
+        theta = np.arctan2(self.y, self.x)
+        theta = theta if theta >= 0 else theta + 2 * np.pi
+        return PolarPoint(rho=rho, phi=phi, theta=theta, opt=AngleMode.RADIANS)
 
 class PolarPoint():
     def __init__(self, rho: float, phi: float, theta: float, opt: AngleMode):
-        
+
         """
         Polar Point
 
@@ -67,19 +75,19 @@ class PolarPoint():
 
         self.opt = opt
         self.rho = rho
-        
+
         if opt == AngleMode.DEGREE:
             phi = np.deg2rad(phi)
             theta = np.deg2rad(theta)
-        
+
         self.phi = phi
         self.theta = theta
-        
+
     def get_cartesian(self, mode: CoordMode) -> CartesianPoint:
         x = 0.0
         y = 0.0
         z = 0.0
-        
+
         match mode:
             case CoordMode.REGULAR:
                 x = np.sin(self.theta) * np.cos(self.phi)
@@ -92,13 +100,13 @@ class PolarPoint():
             case _:
                 print("[ERROR] Mode not allowed!")
                 exit(1)
-        
+
         x = x * 0.99
         y = y * 0.99 + 0.01
         z = z * 0.99
-        
+
         return CartesianPoint(x=x, y=y, z=z)
-    
+
     def _get_hash(self, temp: float, hum: float, pres: float):
         return hashlib.md5(f"{self.rho}_{self.phi}_{self.theta}_{temp}_{hum}_{pres}".encode()).hexdigest()
 
@@ -125,7 +133,7 @@ class AirData():
         pressure : float
             atmospheric pressure in Pa, default = 101325
         """
-        
+
         self.kelvin = temperature + 273.15
         self.humidity = humidity
         self.pressure = pressure / P_REF
@@ -146,47 +154,47 @@ class ISO9613Filter():
         self.fs = fs
         self.frequencies = np.linspace(0, self.fs / 2, NFREQS)
         self.fnorm = self.frequencies / (self.fs / 2) # normalized
-    
+
     def get_attenuation_air_absorption(self) -> NDArray[np.float64]:
         p_sat = P_REF * (10 ** (-6.8346 * (273.16 / self.air_data.kelvin) ** 1.261 + 4.6151))
         h = self.air_data.humidity * (p_sat / (self.air_data.pressure * P_REF))
         tr = self.air_data.kelvin / T0
         tr_pos = tr ** 0.5
         tr_neg = tr ** -0.5
-        
+
         # Frequenze di rilassamento per ossigeno e azoto (Hz)
         f_rO = self.air_data.pressure * (24.0 + 4.04e4 * h * (0.02 + h) / (0.391 + h))
         f_rN = self.air_data.pressure * tr_neg * (9.0 + 280.0 * h * np.exp(-4.17 * (tr ** (-1 / 3.0) - 1.0)))
-        
+
         # Calcolo del coefficiente di assorbimento in dB/m
         freq_squared = self.frequencies ** 2
-        
+
         # Termine per l'assorbimento classico (viscosità e conduzione termica)
         alpha_classical = (
-            1.84e-11 
-            * (1 / self.air_data.pressure) 
+            1.84e-11
+            * (1 / self.air_data.pressure)
             * tr_pos
         )
-        
+
         # Termine per il rilassamento dell'ossigeno
         alpha_oxygen = (
-            0.01275 
-            * np.exp(-2239.1 / self.air_data.kelvin) 
+            0.01275
+            * np.exp(-2239.1 / self.air_data.kelvin)
             * (f_rO + (freq_squared / f_rO)) ** -1
         )
-        
+
         # Termine per il rilassamento dell'azoto
         alpha_nitrogen = (
-            0.1068 
-            * np.exp(-3352.0 / self.air_data.kelvin) 
+            0.1068
+            * np.exp(-3352.0 / self.air_data.kelvin)
             * (f_rN + (f_rN ** 2 + freq_squared)) ** -1
         )
-        
+
         # Coefficiente di assorbimento totale (in dB/m)
         alpha_term = alpha_classical + tr ** (-2.5) * (alpha_oxygen + alpha_nitrogen)
         alpha = 8.686 * freq_squared * alpha_term
         return alpha.astype(np.float64)
-    
+
     def multiband_fft_filter(self, frame: NDArray[np.float32], attenuation: NDArray[np.float32]):
         # frame is hrir
         n = len(frame)
@@ -194,7 +202,7 @@ class ISO9613Filter():
         fft_freqs = np.linspace(0, 1, n // 2 + 1)
         fresp = gain_interpolator(fft_freqs)
         fresp = fresp.astype(np.complex64)
-        
+
         filtered = None
         if frame.ndim > 1:
             fresp = fresp[:, None]
@@ -205,7 +213,7 @@ class ISO9613Filter():
             fft = np.fft.rfft(frame)
             filtered_fft = filtered_fft = multiply_spectrum(fft, fresp)
             filtered = np.fft.irfft(filtered_fft, n=n)
-        
+
         return filtered
 
     def air_absorption_filter(self, frame: NDArray[np.float64], alpha_absortion: NDArray[np.float64], distance: float) -> NDArray[np.float64]:
@@ -217,29 +225,30 @@ class ISO9613Filter():
         return filtered
 
 class GeometricAttenuation():
-    def __init__(self, fs: float, channels: int = 1) -> None:
+    def __init__(self, fs: float, gamma: float, channels: int = 1) -> None:
         self.fs = fs
+        self.gamma = gamma
         self.curr_delay = np.zeros(channels, dtype=float)
         self.max_delay_sample = int(MAX_DELAY_SEC * self.fs)
-        
+
     def apply_fractional_delay(self, signal: NDArray[np.float64], distance: float, channel: int) -> float:
         channel_index = channel
         delay = distance * self.fs / SOUND_SPEED
         delta_delay = delay - self.curr_delay[channel_index]
         delta_delay = np.clip(delta_delay, -SLEW_RATE, SLEW_RATE) # Controlla la pendenza (slew rate) della variazione di delay in campioni per campione
         self.curr_delay[channel_index] += delta_delay
-        
+
         n = len(signal)
         indexes = np.arange(n)
         delayed_indexes = indexes - self.curr_delay[channel]
         interpolator = interp1d(indexes, signal, kind="linear", bounds_error=False, fill_value=0.0)
         return interpolator(delayed_indexes)
-        
+
     def calculate_geometric_attenuation(self, source_distance: float, distance: float) -> float:
         original_distance = max(source_distance, ETA)
-        factor = (original_distance / distance) ** GAMMA # il fattore di attenuazione è in rapporto con la distanza originale in modo tale da lasciare invariata l'ampiezza alla distanza originale
+        factor = (original_distance / distance) ** self.gamma # il fattore di attenuazione è in rapporto con la distanza originale in modo tale da lasciare invariata l'ampiezza alla distanza originale
         return factor
-    
+
 def woodworth_itd3d(point: PolarPoint) -> float:
     # theta = (point.theta + np.pi) % (2 * np.pi) - np.pi
     sin_theta = np.sin(-point.theta)
@@ -301,23 +310,23 @@ class LRUCache[T]():
         self.tail = Node(key="TAIL", value=None)
         self.head.next_node = self.tail
         self.tail.prev_node = self.head
-    
+
     def __remove(self, node: Node) -> None:
         prev = node.prev_node
         nxt = node.next_node
         prev.next_node = nxt
         nxt.prev_node = prev
-    
+
     def __add(self, node: Node) -> None:
         node.next_node = self.head.next_node
         node.prev_node = self.head
         self.head.next_node.prev_node = node
         self.head.next_node = node
-    
+
     def __move_to_head(self, node: Node) -> None:
         self.__remove(node=node)
         self.__add(node=node)
-    
+
     def put(self, key: str, value: T) -> None:
         if key in self.cache:
             self.__move_to_head(node=self.cache[key])
@@ -325,12 +334,12 @@ class LRUCache[T]():
             node = Node(key=key, value=value)
             self.cache[key] = node
             self.__add(node=node)
-        
+
         if len(self.cache) > self.capacity:
             lru = self.tail.prev_node
             self.__remove(node=lru)
             del self.cache[lru.key]
-        
+
     def get(self, key: str) -> T|None:
         if key in self.cache:
             node = self.cache[key]
@@ -338,3 +347,59 @@ class LRUCache[T]():
             return node.value
         else:
             return None
+
+
+
+class LinearTrajectory():
+    def __init__(self, cpa: NDArray[np.float32], direction: NDArray[np.float32]) -> None:
+        """
+        SET TRAJECTORY
+
+        Parameters
+        ----------
+        cpa : NDArray[float]
+            at index [0] x = front-back meters
+            at index [1] y = left-right meters
+            at index [2] z = up-down meters
+        
+        direction : NDArray[float] 
+        """
+        
+        self.cpa = cpa
+        norm = np.linalg.norm(direction)
+        if norm == 0:
+            print("[ERROR] Direction vector must be not zero")
+            exit(1)
+            
+        self.direction = direction / norm
+    
+    def get_points(self, distances: NDArray[np.float32]) -> list[PolarPoint]:
+        point = self.cpa + self.direction * distances[:, None] # Formula: P0 + V * steps
+        points = []
+        for p in point:
+            points.append(CartesianPoint(p[0], p[1], p[2]).to_polar())
+        return points
+
+class ParametricTrajectory():
+    @staticmethod
+    def get_circular_points(omega: NDArray[np.float32], t: NDArray[np.float32], radius: NDArray[np.float32], start_elevation: float, vertical_vel: NDArray[np.float32]) -> list[PolarPoint]:
+        x = radius * np.cos(omega * t)
+        y = radius * np.sin(omega * t)
+        z = start_elevation + vertical_vel * t
+        stack = np.stack((x, y, z), axis=-1)
+        points = []
+        for p in stack:
+            points.append(CartesianPoint(p[0], p[1], p[2]).to_polar())
+        return points
+    
+    @staticmethod
+    def get_parabolic_points(total_distance: float, total_duration: float, max_elevation: float, t: NDArray[np.float32]) -> list[PolarPoint]:
+        t_norm = t - (total_duration / 2)
+        x = (total_distance / total_duration) * t - (total_distance / 2)
+        y = np.zeros_like(t)
+        z = max_elevation * (1 - (t_norm / (total_duration / 2)) ** 2)
+        stack = np.stack((x, y, z), axis=-1)
+        points = []
+        for p in stack:
+            points.append(CartesianPoint(p[0], p[1], p[2]).to_polar())
+        return points

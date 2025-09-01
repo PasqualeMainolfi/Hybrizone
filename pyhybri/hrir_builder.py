@@ -76,13 +76,13 @@ class HInfo():
 
 class HRIRBuilder():
 
-    def __init__(self, hrir_database: str, mode: CoordMode, interp_domain: InterpolationDomain):
+    def __init__(self, hrir_database: str, mode: CoordMode, interp_domain: InterpolationDomain, gamma: float):
         self.dataset = HrirHDFData(dataset_path=hrir_database, coord_mode=mode)
         self.mode = mode
         self.hrir_shape = self.dataset.get_shape()
         self.fs = self.dataset.get_sample_rate()
         self.source_distance = self.dataset.get_source_distance()
-        self.geometric_attenuation = GeometricAttenuation(fs=self.fs, channels=2)
+        self.geometric_attenuation = GeometricAttenuation(fs=self.fs, channels=2, gamma=gamma)
         self.interp_domain = interp_domain
         self.iso9613 = None
         self.db_attenuation = None
@@ -159,7 +159,7 @@ class HRIRBuilder():
                         case InterpolationDomain.FREQUENCY:
                             interpolated_freq = (1 - alpha) * h[0]["fft"] + alpha * h[1]["fft"]
 
-            case BuildMode.SPHERICAL:
+            case BuildMode.SLERPL:
                 target = hrirs_info.target.get_cartesian(mode=self.mode)
                 target = np.array([target.x, target.y, target.z], dtype=np.float64)
 
@@ -269,6 +269,7 @@ class HRIRBuilder():
             return HInfo(point_hash=point_hash)
 
         cart = point.get_cartesian(mode=self.mode)
+        # print(cart.x, cart.y, cart.z)
         distances, indices = self.dataset.neighs_finder.query([cart.x, cart.y, cart.z], k=neighs)
 
         hinfo = HInfo(

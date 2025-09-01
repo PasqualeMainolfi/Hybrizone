@@ -1,6 +1,6 @@
 import scipy.signal
 import hrir_builder as hrb
-from hybri_tools import CoordMode, PolarPoint, BuildMode, InterpolationDomain, AirData, CurveMode, HBuilded, RBuilded, intermediate_segment
+from hybri_tools import CoordMode, PolarPoint, BuildMode, InterpolationDomain, AirData, CurveMode, HBuilded, RBuilded, intermediate_segment, CartesianPoint, LinearTrajectory, ParametricTrajectory
 from hybri_tools import AngleMode # noqa
 from hrir_builder import HInfo
 import rir_builder as rib
@@ -44,7 +44,8 @@ class HybriParams():
         build_mode: BuildMode, 
         chunk_size: int = 1024, 
         interpolation_neighs: int = 3, 
-        sample_rate: float = 44100
+        sample_rate: float = 44100,
+        gamma: float = 1.0
     ) -> None:
         
         """
@@ -78,6 +79,7 @@ class HybriParams():
         self.chunk_size = chunk_size
         self.interpolation_neighs = interpolation_neighs
         self.fs = sample_rate
+        self.gamma = gamma
 
 class RTOverlapSaveBufferConvolution():
     def __init__(self, chunk: int):
@@ -119,14 +121,21 @@ class Hybrizone():
 
     def __init__(self, params: HybriParams) -> None:
         self.__params = params
-        self.hrir_builder = hrb.HRIRBuilder(hrir_database=params.hrir_database_path, mode=params.coord_mode, interp_domain=params.interpolation_domain)
+        
+        self.hrir_builder = hrb.HRIRBuilder(
+            hrir_database=params.hrir_database_path, 
+            mode=params.coord_mode, 
+            interp_domain=params.interpolation_domain, 
+            gamma=params.gamma
+        )
 
         self.rir_builder = None
         self.__rir_buffer = None
         if self.__params.rir_database_path is not None:
             self.rir_builder = rib.RIRMorpha(
                 rir_database_path=str(params.rir_database_path), 
-                source_distance=self.hrir_builder.dataset.get_source_distance()
+                source_distance=self.hrir_builder.dataset.get_source_distance(),
+                gamma=params.gamma
             )
             self.__rir_buffer = RTOverlapSaveBufferConvolution(chunk=self.__params.chunk_size)
 
