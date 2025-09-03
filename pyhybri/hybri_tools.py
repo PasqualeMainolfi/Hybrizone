@@ -42,13 +42,13 @@ class BuildMode(Enum):
 class InterpolationDomain(Enum):
     TIME = 0
     FREQUENCY = 1
-        
+
 class CartesianPoint():
     def __init__(self, x: float, y: float, z: float):
         self.x = x
         self.z = z
         self.y = y
-        
+
     def to_polar(self):
         rho = np.sqrt(self.x * self.x + self.y * self.y + self.z * self.z)
         rho = max(rho, ETA)
@@ -361,18 +361,18 @@ class LinearTrajectory():
             at index [0] x = front-back meters
             at index [1] y = left-right meters
             at index [2] z = up-down meters
-        
-        direction : NDArray[float] 
+
+        direction : NDArray[float]
         """
-        
+
         self.cpa = cpa
         norm = np.linalg.norm(direction)
         if norm == 0:
             print("[ERROR] Direction vector must be not zero")
             exit(1)
-            
+
         self.direction = direction / norm
-    
+
     def get_points(self, distances: NDArray[np.float32]) -> list[PolarPoint]:
         point = self.cpa + self.direction * distances[:, None] # Formula: P0 + V * steps
         points = []
@@ -391,7 +391,7 @@ class ParametricTrajectory():
         for p in stack:
             points.append(CartesianPoint(p[0], p[1], p[2]).to_polar())
         return points
-    
+
     @staticmethod
     def get_parabolic_points(total_distance: float, total_duration: float, max_elevation: float, t: NDArray[np.float32]) -> list[PolarPoint]:
         t_norm = t - (total_duration / 2)
@@ -403,3 +403,14 @@ class ParametricTrajectory():
         for p in stack:
             points.append(CartesianPoint(p[0], p[1], p[2]).to_polar())
         return points
+
+def linear_direction_info(direction: NDArray[np.float32]) -> None:
+    rho = np.linalg.norm(direction)
+    if rho == 0:
+        print("[ERROR] Zero norm!")
+        exit(1)
+    azi = np.rad2deg(np.arctan2(direction[1], direction[0]))
+    ele = np.rad2deg(np.arcsin(direction[2] / rho))
+    print("[DIRECTION INFO]")
+    print(f"[AZIMUTH VARIATION] = {azi:.3f}\u00B0")
+    print(f"[ELEVATION VARIATION] = {ele:.3f}\u00B0")
