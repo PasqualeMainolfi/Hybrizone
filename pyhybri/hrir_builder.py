@@ -91,13 +91,16 @@ class HRIRBuilder():
         self.__prev_distance = None
 
         self.__cache_hrir_builded = LRUCache[HBuilded](capacity=LRU_CAPACITY)
+        
+        self.sound_speed = None
 
     def close(self) -> None:
         self.dataset.close_data()
 
-    def set_air_conditions(self, air_data: AirData) -> None:
+    def set_air_conditions(self, air_data: AirData, sound_speed: float) -> None:
         self.iso9613 = ISO9613Filter(air_data=air_data, fs=self.fs)
         self.db_attenuation = self.iso9613.get_attenuation_air_absorption()
+        self.sound_speed = sound_speed
 
     def __interpolated_hrir(self, hrirs_info: HInfo, method: BuildMode, mode: InterpolationDomain) -> HBuilded:
         h = hrirs_info.hrirs if mode == InterpolationDomain.TIME else hrirs_info.hrtfs
@@ -130,7 +133,7 @@ class HRIRBuilder():
                     w /= np.sum(w)
 
                 if check_itd_distance:
-                    interpolated_itd = woodworth_itd3d(point=hrirs_info.target)
+                    interpolated_itd = woodworth_itd3d(point=hrirs_info.target, sound_speed=get_sound_speed)
                 else:
                     interpolated_itd = np.sum([w[i] * itds_temp[i] for i in range(len(itds_temp))])
 
@@ -149,7 +152,7 @@ class HRIRBuilder():
                     # print(alpha)
 
                     if check_itd_distance:
-                        interpolated_itd = woodworth_itd3d(point=hrirs_info.target)
+                        interpolated_itd = woodworth_itd3d(point=hrirs_info.target, sound_speed=self.sound_speed)
                     else:
                         interpolated_itd = (1 - alpha) * hrirs_info.itds[0] + alpha * hrirs_info.itds[1]
 
@@ -186,7 +189,7 @@ class HRIRBuilder():
                     b = np.sin(alpha * omega) / sin_omega
 
                 if check_itd_distance:
-                    interpolated_itd = woodworth_itd3d(point=hrirs_info.target)
+                    interpolated_itd = woodworth_itd3d(point=hrirs_info.target, sound_speed=self.sound_speed)
                 else:
                     interpolated_itd = a * hrirs_info.itds[0] + b * hrirs_info.itds[1]
 
@@ -234,8 +237,8 @@ class HRIRBuilder():
 
         if factor < 1.0:
             with ThreadPoolExecutor(max_workers=2) as delayer:
-                lc = delayer.submit(self.geometric_attenuation.apply_fractional_delay, signal=hrir[:, 0], distance=rho, channel=0)
-                rc = delayer.submit(self.geometric_attenuation.apply_fractional_delay, signal=hrir[:, 1], distance=rho, channel=1)
+                lc = delayer.submit(self.geometric_attenuation.apply_fractional_delay, signal=hrir[:, 0], distance=rho, channel=0, sound_speed=self.sound_speed)
+                rc = delayer.submit(self.geometric_attenuation.apply_fractional_delay, signal=hrir[:, 1], distance=rho, channel=1, sound_speed=self.sound_speed)
                 hrir[:, 0] = lc.result()
                 hrir[:, 1] = rc.result()
 

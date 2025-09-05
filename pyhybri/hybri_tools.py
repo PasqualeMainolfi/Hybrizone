@@ -6,7 +6,6 @@ import hashlib
 from numba import njit
 
 HEAD_RADIUS = 0.0875 # metri
-SOUND_SPEED = 343.3 # sound speed
 NFREQS = 256 # n freqs for multiband filter
 GAMMA = 0.7 # exponent in distance perception
 ETA = HEAD_RADIUS + 0.001 # minimum distance threshold
@@ -18,6 +17,10 @@ T0 = 293.15
 INTERNAL_KERNEL_TRANSITION = 0.003 # in sec.
 MAX_DISTANCE_TRANSITION = 0.5
 LRU_CAPACITY = 4096
+
+HOT_GAMMA = 1.40
+R_AIR = 287.05 # J/(KgK)
+R_V = 461.5 # J/(KgK)
 
 class CurveMode(Enum):
     LINEAR = 0
@@ -133,10 +136,14 @@ class AirData():
         pressure : float
             atmospheric pressure in Pa, default = 101325
         """
+        
+        self.celsius = temperature
+        self.pres_pa = pressure
 
         self.kelvin = temperature + 273.15
         self.humidity = humidity
         self.pressure = pressure / P_REF
+        
 
 class HBuilded():
     def __init__(self, hrir: NDArray[np.float64], itd: float, gain: NDArray[np.float64]):
@@ -231,9 +238,9 @@ class GeometricAttenuation():
         self.curr_delay = np.zeros(channels, dtype=float)
         self.max_delay_sample = int(MAX_DELAY_SEC * self.fs)
 
-    def apply_fractional_delay(self, signal: NDArray[np.float64], distance: float, channel: int) -> float:
+    def apply_fractional_delay(self, signal: NDArray[np.float64], distance: float, channel: int, sound_speed: float) -> float:
         channel_index = channel
-        delay = distance * self.fs / SOUND_SPEED
+        delay = distance * self.fs / sound_speed
         delta_delay = delay - self.curr_delay[channel_index]
         delta_delay = np.clip(delta_delay, -SLEW_RATE, SLEW_RATE) # Controlla la pendenza (slew rate) della variazione di delay in campioni per campione
         self.curr_delay[channel_index] += delta_delay
@@ -249,13 +256,13 @@ class GeometricAttenuation():
         factor = (original_distance / distance) ** self.gamma # il fattore di attenuazione è in rapporto con la distanza originale in modo tale da lasciare invariata l'ampiezza alla distanza originale
         return factor
 
-def woodworth_itd3d(point: PolarPoint) -> float:
+def woodworth_itd3d(point: PolarPoint, sound_speed: float) -> float:
     # theta = (point.theta + np.pi) % (2 * np.pi) - np.pi
     sin_theta = np.sin(-point.theta)
     cos_phi = np.cos(point.phi)
     svalue = point.rho * point.rho + HEAD_RADIUS * HEAD_RADIUS - 2 * HEAD_RADIUS * point.rho * sin_theta * cos_phi
     num = point.rho + HEAD_RADIUS * sin_theta * cos_phi - np.sqrt(svalue)
-    return num / SOUND_SPEED
+    return num / sound_speed
 
 class RBuilded():
     def __init__(self, rir: NDArray[np.float64], power_spectrum: NDArray[np.float64], freqs: NDArray[np.float64], integr: NDArray[np.float64]):
@@ -349,6 +356,14 @@ class LRUCache[T]():
             return None
 
 
+def get_sound_speed(temp_celsius: float, rh: float, pres_pa: float) -> float: # sqrt(gamma * P / p)
+    kelv = temp_celsius + 273.15
+    p_sat = 6.1078 * pow(10, 7.5 * temp_celsius / (temp_celsius + 237.3)) * 100.0
+    p_v = rh * p_sat
+    rho = (pres_pa - p_v) / (R_AIR * kelv) + p_v / (R_V * kelv)
+    c = np.sqrt(HOT_GAMMA * pres_pa / rho)    
+    return c
+    
 
 class LinearTrajectory():
     def __init__(self, cpa: NDArray[np.float32], direction: NDArray[np.float32]) -> None:
@@ -373,36 +388,30 @@ class LinearTrajectory():
 
         self.direction = direction / norm
 
-    def get_points(self, distances: NDArray[np.float32]) -> list[PolarPoint]:
-        point = self.cpa + self.direction * distances[:, None] # Formula: P0 + V * steps
-        points = []
+    def get_points(self, distances: NDArray[np.float32]) -> tuple[list[PolarPoint], list[CartesianPoint]]:
+        point = self.cpa + self.direction * distances[:, None] # Formula: P0 + V * t
+        points_p = []
+        points_c = []
         for p in point:
-            points.append(CartesianPoint(p[0], p[1], p[2]).to_polar())
-        return points
+            c = CartesianPoint(p[0], p[1], p[2])
+            points_p.append(c.to_polar())
+            points_c.append(c)
+        return (points_p, points_c)
 
 class ParametricTrajectory():
     @staticmethod
-    def get_circular_points(omega: NDArray[np.float32], t: NDArray[np.float32], radius: NDArray[np.float32], start_elevation: float, vertical_vel: NDArray[np.float32]) -> list[PolarPoint]:
+    def get_circular_points(omega: NDArray[np.float32], t: NDArray[np.float32], radius: NDArray[np.float32], start_elevation: float, vertical_vel: NDArray[np.float32]) -> tuple[list[PolarPoint], list[CartesianPoint]]:
         x = radius * np.cos(omega * t)
         y = radius * np.sin(omega * t)
         z = start_elevation + vertical_vel * t
         stack = np.stack((x, y, z), axis=-1)
-        points = []
+        points_p = []
+        points_c = []
         for p in stack:
-            points.append(CartesianPoint(p[0], p[1], p[2]).to_polar())
-        return points
-
-    @staticmethod
-    def get_parabolic_points(total_distance: float, total_duration: float, max_elevation: float, t: NDArray[np.float32]) -> list[PolarPoint]:
-        t_norm = t - (total_duration / 2)
-        x = (total_distance / total_duration) * t - (total_distance / 2)
-        y = np.zeros_like(t)
-        z = max_elevation * (1 - (t_norm / (total_duration / 2)) ** 2)
-        stack = np.stack((x, y, z), axis=-1)
-        points = []
-        for p in stack:
-            points.append(CartesianPoint(p[0], p[1], p[2]).to_polar())
-        return points
+            c = CartesianPoint(p[0], p[1], p[2])
+            points_p.append(c.to_polar())
+            points_c.append(c)
+        return (points_p, points_c)
 
 def linear_direction_info(direction: NDArray[np.float32]) -> None:
     rho = np.linalg.norm(direction)

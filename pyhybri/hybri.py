@@ -10,6 +10,7 @@ from hybri_tools import (
     HBuilded,
     RBuilded,
     intermediate_segment,
+    get_sound_speed,
     AngleMode, # noqa: F401
     CartesianPoint, # noqa: F401
     LinearTrajectory, # noqa: F401
@@ -164,6 +165,8 @@ class Hybrizone():
         self.__rtime = 0.0
         self.__ptime = 0.0
         self.__counter = 1
+        
+        self.sound_speed = None
 
     def close(self) -> None:
         """
@@ -258,11 +261,10 @@ class Hybrizone():
         air_data : AirData
             set air conditions: temperature, humidity and pressure (see AirData)
         """
-
-        self.hrir_builder.set_air_conditions(air_data=air_data)
+        self.sound_speed = get_sound_speed(temp_celsius=air_data.celsius, rh=air_data.humidity, pres_pa=air_data.pres_pa)
+        self.hrir_builder.set_air_conditions(air_data=air_data, sound_speed=self.sound_speed)
         if self.rir_builder is not None:
-            self.rir_builder.set_air_conditions(air_data=air_data)
-
+            self.rir_builder.set_air_conditions(air_data=air_data, sound_speed=self.sound_speed)
 
     def query_hrirs(self, spatial_position: PolarPoint, n_neighs: int) -> HInfo:
         """

@@ -60,13 +60,15 @@ class RIRMorpha():
         self.cache_data = { "r1": None, "r2": None, "sf": None }
         
         self.__prev_dist = None
+        self.sound_speed = None
 
     def close(self) -> None:
         self.dataset.close()       
     
-    def set_air_conditions(self, air_data: AirData) -> None:
+    def set_air_conditions(self, air_data: AirData, sound_speed: float) -> None:
         self.iso9613 = ISO9613Filter(air_data=air_data, fs=self.fs)
         self.db_attenuation = self.iso9613.get_attenuation_air_absorption()
+        self.sound_speed = sound_speed
     
     def set_rirs(self, rir1: int, rir2: int, smooth_factor: float = 0.1) -> None:
         """
