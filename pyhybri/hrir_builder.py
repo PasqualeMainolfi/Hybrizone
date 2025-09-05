@@ -133,7 +133,7 @@ class HRIRBuilder():
                     w /= np.sum(w)
 
                 if check_itd_distance:
-                    interpolated_itd = woodworth_itd3d(point=hrirs_info.target, sound_speed=get_sound_speed)
+                    interpolated_itd = woodworth_itd3d(point=hrirs_info.target, sound_speed=self.sound_speed)
                 else:
                     interpolated_itd = np.sum([w[i] * itds_temp[i] for i in range(len(itds_temp))])
 
