@@ -76,11 +76,7 @@ def load_audio_example(audio: AudioExample):
     s = wave.open(path_to_example, "r")
     return s
 
-<<<<<<< HEAD
-CHUNK = 2048
-=======
 CHUNK = 4096
->>>>>>> pyclear
 SR = 44100
 CHANNELS = 2
 
@@ -99,15 +95,10 @@ if USE_PYGAME:
 
 # main function
 def main() -> None:
-<<<<<<< HEAD
-    SCREEN = pygame.display.set_mode((1280, 720))
-    clock = pygame.time.Clock()
-=======
 
     if USE_PYGAME:
         SCREEN = pygame.display.set_mode((1280, 720))
         clock = pygame.time.Clock()
->>>>>>> pyclear
 
     # AUDIO_SIGNAL = load_audio_example(audio=AudioExample.FOOTSTEP)
     # frame_block = AUDIO_SIGNAL.readframes(CHUNK)
@@ -134,35 +125,10 @@ def main() -> None:
 
     stream.start_stream()
 
-<<<<<<< HEAD
-    # IN-HEAD
-    # distances = np.abs(np.linspace(1, -1, nblocks, endpoint=True)) * max_distance
-    # azimuths = np.zeros(nblocks)
-    # elevations = np.zeros(nblocks)
-
-    # FIXED_AZI = 0.0 # IN-FRONT
-    # FIXED_PHI = 40 # IN-FRONT
-
-    # azimuths[:nblocks // 2 + 1] = FIXED_AZI
-    # azimuths[nblocks // 2 + 1:] = FIXED_AZI + 180 # invert azi to back FLY-BY
-    # elevations[:nblocks // 2 + 1] = FIXED_PHI
-    # elevations[nblocks // 2 + 1:] = -FIXED_PHI # invert ele to back
-
-=======
->>>>>>> pyclear
     AUDIO_SIGNAL = load_audio_example(audio=AudioExample.HELICOPTER1)
     frame_block = AUDIO_SIGNAL.readframes(CHUNK)
     nblocks = AUDIO_SIGNAL.getnframes() // CHUNK
 
-<<<<<<< HEAD
-    MAX_DISTANCE = 200
-    example_mode = "linear_traj"
-
-    points_pol, points_car = None, None
-    match example_mode:
-        case "linear_traj":
-            cpa = np.array([0.0, 0.0, 3.0]) # closest point (left Y pos, in front X pos, up Z pos)
-=======
     MAX_DISTANCE = 100
     GAIN = 3
     example_mode = Traj.LINEAR
@@ -171,7 +137,6 @@ def main() -> None:
     match example_mode:
         case Traj.LINEAR:
             cpa = np.array([1.0, 0.0, -3.0]) # closest point (left Y pos, in front X pos, up Z pos)
->>>>>>> pyclear
             direction = np.array([-1.0, 0.0, 0.0])
 
             linear_direction_info(direction=direction)
@@ -197,23 +162,12 @@ def main() -> None:
             points_pol, points_car = ParametricTrajectory.get_circular_points(omega=omega, t=times, radius=distances_circular, start_elevation=start_elevelation_pos, vertical_vel=vertical_vel)
 
     SCALE = 50
-<<<<<<< HEAD
-    GAIN = 2
-=======
->>>>>>> pyclear
     RUN = True
 
     print(f"[INFO] Sound speed: {AURALIZER.sound_speed:.5f} m/s")
 
     index = 0
     while frame_block != b'':
-<<<<<<< HEAD
-
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                RUN = False
-=======
->>>>>>> pyclear
 
         if USE_PYGAME:
             for event in pygame.event.get():
@@ -233,24 +187,7 @@ def main() -> None:
             frame = np.frombuffer(frame_block, dtype=np.int16) # mono
             frame = (frame / 32768.0) * GAIN
 
-<<<<<<< HEAD
-            # print(f"rho: [{pos.rho}], phi: [{pos.phi}], theta: [{pos.theta}]")
-
-            depth = cart.x + 1e-12
-            world_x = cart.y
-            world_y = cart.z
-
-            x_screen = (-world_x * SCALE / depth) + SCREEN.get_width() / 2
-            y_screen = SCREEN.get_height() / 2 - (world_y * SCALE / depth)
-
-            radius = 1 * SCALE / depth
-            print(f"x: [{x_screen}], y: [{y_screen}], DEPTH: [{radius}]")
-
-            pygame.draw.circle(SCREEN, "white", center=(x_screen, y_screen), radius=radius)
-=======
             print(f"rho: [{pos.rho}], phi: [{pos.phi}], theta: [{pos.theta}]")
-
-
 
             if USE_PYGAME:
                 depth = cart.x + 1e-12
@@ -262,7 +199,6 @@ def main() -> None:
                 radius = 1 * SCALE / depth
                 print(f"x: [{x_screen}], y: [{y_screen}], DEPTH: [{radius}]")
                 pygame.draw.circle(SCREEN, "white", center=(x_screen, y_screen), radius=radius)
->>>>>>> pyclear
 
             # pos = PolarPoint(rho=current_rho, phi=current_phi, theta=current_theta, opt=AngleMode.DEGREE)
             AURALIZER.set_position(position=pos)
@@ -299,12 +235,8 @@ def main() -> None:
     PORTAUDIO.terminate()
     AUDIO_SIGNAL.close()
 
-<<<<<<< HEAD
-    pygame.quit()
-=======
     if USE_PYGAME:
         pygame.quit()
->>>>>>> pyclear
 
 # [MAIN PROGRAM]: if the module is being run as the main program, it calls the "main()" function
 if __name__ == "__main__":
