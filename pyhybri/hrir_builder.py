@@ -3,10 +3,9 @@ from numpy.typing import NDArray
 import h5py
 import scipy as sp
 from concurrent.futures import ThreadPoolExecutor
-from hybri_tools import AirData, ISO9613Filter, GeometricAttenuation, ETA, CoordMode, PolarPoint, InterpolationDomain, LRUCache
-from hybri_tools import BuildMode, HBuilded, woodworth_itd3d, cross_fade, INTERNAL_KERNEL_TRANSITION, MAX_DISTANCE_TRANSITION, LRU_CAPACITY
+from hybri_tools import AirData, ISO9613Filter, GeometricAttenuation, ETA, CoordMode, PolarPoint, LRUCache
+from hybri_tools import HBuilded, woodworth_itd3d, cross_fade, INTERNAL_KERNEL_TRANSITION, MAX_DISTANCE_TRANSITION, LRU_CAPACITY
 # import time
-
 
 class HrirHDFData():
     def __init__(self, dataset_path: str, coord_mode: CoordMode):
@@ -76,14 +75,13 @@ class HInfo():
 
 class HRIRBuilder():
 
-    def __init__(self, hrir_database: str, mode: CoordMode, interp_domain: InterpolationDomain, gamma: float):
+    def __init__(self, hrir_database: str, mode: CoordMode, gamma: float):
         self.dataset = HrirHDFData(dataset_path=hrir_database, coord_mode=mode)
         self.mode = mode
         self.hrir_shape = self.dataset.get_shape()
         self.fs = self.dataset.get_sample_rate()
         self.source_distance = self.dataset.get_source_distance()
         self.geometric_attenuation = GeometricAttenuation(fs=self.fs, channels=2, gamma=gamma)
-        self.interp_domain = interp_domain
         self.iso9613 = None
         self.db_attenuation = None
 
@@ -102,12 +100,7 @@ class HRIRBuilder():
         self.db_attenuation = self.iso9613.get_attenuation_air_absorption()
         self.sound_speed = sound_speed
 
-    def __interpolated_hrir(self, hrirs_info: HInfo, method: BuildMode, mode: InterpolationDomain) -> HBuilded:
-        h = hrirs_info.hrirs if mode == InterpolationDomain.TIME else hrirs_info.hrtfs
-
-        interpolated_freq = None
-        interpolated_time = None
-        interpolated_itd = None
+    def __interpolated_hrir(self, hrirs_info: HInfo) -> HBuilded:
 
         check_itd_distance = True if hrirs_info.target.rho < self.dataset.get_source_distance() else False
         gfac = hrirs_info.target.rho - self.source_distance
@@ -118,116 +111,54 @@ class HRIRBuilder():
         if hrirs_info.distances[min_arg] < 1e-5:
             return HBuilded(hrir=hrirs_info.hrirs[min_arg], itd=hrirs_info.itds[min_arg], gain=gain)
 
-        match method:
+        target = hrirs_info.target.get_cartesian(mode=self.mode)
+        target = np.array([target.x, target.y, target.z], dtype=np.float64)
 
-            case BuildMode.INVERSE_DISTANCE | BuildMode.LINEAR_INVERSE_DISTANCE:
-                w = 1 / hrirs_info.distances ** 2 if method == BuildMode.INVERSE_DISTANCE else 1 / hrirs_info.distances
-                w /= np.sum(w)
+        tnorm = np.linalg.norm(target)
+        h1norm = np.linalg.norm(hrirs_info.coords[0])
+        h2norm = np.linalg.norm(hrirs_info.coords[1])
 
-                ref_itds = hrirs_info.itds[:2]
-                itds_ref_std = np.std(ref_itds)
-                itds_temp = hrirs_info.itds
-                if np.std(hrirs_info.itds) > 3 * itds_ref_std:
-                    itds_temp = ref_itds
-                    w = 1 / hrirs_info.distances[:2] ** 2 if method == BuildMode.INVERSE_DISTANCE else 1 / hrirs_info.distances[:2]
-                    w /= np.sum(w)
+        tar = target / tnorm
+        h1 = hrirs_info.coords[0] / h1norm
+        h2 = hrirs_info.coords[1] / h2norm
 
-                if check_itd_distance:
-                    interpolated_itd = woodworth_itd3d(point=hrirs_info.target, sound_speed=self.sound_speed)
-                else:
-                    interpolated_itd = np.sum([w[i] * itds_temp[i] for i in range(len(itds_temp))])
+        omega = np.arccos(np.clip(np.dot(h1, h2), -1.0, 1.0))
 
-                match mode:
-                    case InterpolationDomain.TIME:
-                        interpolated_time = np.sum([w[i] * h[i] for i in range(len(itds_temp))], axis=0)
-                    case InterpolationDomain.FREQUENCY:
-                        interpolated_freq = np.sum(
-                            [w[i] * h[i]["fft"] for i in range(len(itds_temp))],
-                            axis=0
-                        )
+        if omega == 0.0:
+            a = 0.0
+            b = 1.0
+        else:
+            omega1 = np.arccos(np.clip(np.dot(tar, h1), -1.0, 1.0))
+            omega2 = np.arccos(np.clip(np.dot(tar, h2), -1.0, 1.0))
+            sin_omega = np.sin(omega)
 
-            case BuildMode.LINEAR:
-                    d1, d2 = hrirs_info.distances[0], hrirs_info.distances[1]
-                    alpha = d1 / (d1 + d2)
-                    # print(alpha)
+            alpha = omega1 / (omega1 + omega2)
+            a = np.sin((1 - alpha) * omega) / sin_omega
+            b = np.sin(alpha * omega) / sin_omega
 
-                    if check_itd_distance:
-                        interpolated_itd = woodworth_itd3d(point=hrirs_info.target, sound_speed=self.sound_speed)
-                    else:
-                        interpolated_itd = (1 - alpha) * hrirs_info.itds[0] + alpha * hrirs_info.itds[1]
+        mag = a * hrirs_info.hrtfs[0]["mag"] + b * hrirs_info.hrtfs[1]["mag"]
+        phase = a * np.unwrap(hrirs_info.hrtfs[0]["angle"], axis=0) + b * np.unwrap(hrirs_info.hrtfs[1]["angle"], axis=0)
+        interpolated_kernel = mag * np.exp(1j * phase)
 
-                    match mode:
-                        case InterpolationDomain.TIME:
-                            interpolated_time = (1 - alpha) * h[0] + alpha * h[1]
-                        case InterpolationDomain.FREQUENCY:
-                            interpolated_freq = (1 - alpha) * h[0]["fft"] + alpha * h[1]["fft"]
-
-            case BuildMode.SLERPL:
-                target = hrirs_info.target.get_cartesian(mode=self.mode)
-                target = np.array([target.x, target.y, target.z], dtype=np.float64)
-
-                tnorm = np.linalg.norm(target)
-                h1norm = np.linalg.norm(hrirs_info.coords[0])
-                h2norm = np.linalg.norm(hrirs_info.coords[1])
-
-                tar = target / tnorm
-                h1 = hrirs_info.coords[0] / h1norm
-                h2 = hrirs_info.coords[1] / h2norm
-
-                omega = np.arccos(np.clip(np.dot(h1, h2), -1.0, 1.0))
-
-                if omega == 0.0:
-                    a = 0.0
-                    b = 1.0
-                else:
-                    omega1 = np.arccos(np.clip(np.dot(tar, h1), -1.0, 1.0))
-                    omega2 = np.arccos(np.clip(np.dot(tar, h2), -1.0, 1.0))
-                    sin_omega = np.sin(omega)
-
-                    alpha = omega1 / (omega1 + omega2)
-                    a = np.sin((1 - alpha) * omega) / sin_omega
-                    b = np.sin(alpha * omega) / sin_omega
-
-                if check_itd_distance:
-                    interpolated_itd = woodworth_itd3d(point=hrirs_info.target, sound_speed=self.sound_speed)
-                else:
-                    interpolated_itd = a * hrirs_info.itds[0] + b * hrirs_info.itds[1]
-
-                match mode:
-                    case InterpolationDomain.TIME:
-                        interpolated_time = a * h[0] + b * h[1]
-                    case InterpolationDomain.FREQUENCY:
-                        mag = a * h[0]["mag"] + b * h[1]["mag"]
-                        phase = a * np.unwrap(h[0]["angle"], axis=0) + b * np.unwrap(h[1]["angle"], axis=0)
-                        interpolated_freq = mag * np.exp(1j * phase)
-
+        interpolated_itd = 0.0
+        if check_itd_distance:
+            interpolated_itd = woodworth_itd3d(point=hrirs_info.target, sound_speed=self.sound_speed)
+        else:
+            interpolated_itd = a * hrirs_info.itds[0] + b * hrirs_info.itds[1]
+        
         interpolated_itd = -interpolated_itd
         freqs = np.fft.rfftfreq(self.hrir_shape[0], d=1 / self.fs)
 
-        y = interpolated_freq if mode == InterpolationDomain.FREQUENCY else interpolated_time
-        left, right = y[:, 0], y[:, 1]
+        left, right = interpolated_kernel[:, 0], interpolated_kernel[:, 1]
 
-        result = None
-        if mode == InterpolationDomain.FREQUENCY:
-            if interpolated_itd > 0:
-                right *= np.exp(-2j * np.pi * freqs * interpolated_itd)
-            else:
-                left *= np.exp(-2j * np.pi * freqs * abs(interpolated_itd))
-
-            ifft_left = np.fft.irfft(left).astype(np.float32)
-            ifft_right = np.fft.irfft(right).astype(np.float32)
-            result = np.column_stack((ifft_left, ifft_right)).astype(np.float32)
-
+        if interpolated_itd > 0:
+            right *= np.exp(-2j * np.pi * freqs * interpolated_itd)
         else:
-            samples_delay = int(round(interpolated_itd * self.fs))
-            if interpolated_itd > 0:
-                right = np.roll(right, -samples_delay, axis=0)
-                right[:samples_delay] = 0.0
-            else:
-                left = np.roll(left, samples_delay, axis=0)
-                left[:abs(samples_delay)] = 0.0
+            left *= np.exp(-2j * np.pi * freqs * abs(interpolated_itd))
 
-            result = np.column_stack((left, right)).astype(np.float32)
+        ifft_left = np.fft.irfft(left).astype(np.float32)
+        ifft_right = np.fft.irfft(right).astype(np.float32)
+        result = np.column_stack((ifft_left, ifft_right)).astype(np.float32)
 
         return HBuilded(hrir=result, itd=interpolated_itd, gain=gain)
 
@@ -302,7 +233,7 @@ class HRIRBuilder():
 
         return hinfo
 
-    def build_hrir(self, hrirs_info: HInfo, method: BuildMode) -> HBuilded:
+    def build_hrir(self, hrirs_info: HInfo) -> HBuilded:
         """
         GENERATE INTERPOLATED DISTANCE-BASED HRIR
 
@@ -310,8 +241,6 @@ class HRIRBuilder():
         ----------
         hrirs_info : HInfo
             generated HRIRs info from self.prepare_hrirs method
-        method : BuildMode
-            interpolation mode (see BuildMode)
         hifreq : float, optional
             air absorption filter cut off frequency, by default 18000.0
         c : float, optional
@@ -326,7 +255,7 @@ class HRIRBuilder():
         if hrirs_info.point_hash is not None:
             return self.__cache_hrir_builded.get(key=hrirs_info.point_hash)
 
-        interpolated = self.__interpolated_hrir(hrirs_info=hrirs_info, method=method, mode=self.interp_domain)
+        interpolated = self.__interpolated_hrir(hrirs_info=hrirs_info)
         dhrir_ = self.__distance_based_hrir(hrir=interpolated.hrir, rho=hrirs_info.target.rho)
         dhrir = dhrir_
 

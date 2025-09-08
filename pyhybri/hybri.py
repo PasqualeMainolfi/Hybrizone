@@ -1,15 +1,12 @@
-import scipy.signal
 import hrir_builder as hrb
 from hybri_tools import (
     CoordMode,
     PolarPoint,
-    BuildMode,
-    InterpolationDomain,
     AirData,
     CurveMode,
     HBuilded,
     RBuilded,
-    intermediate_segment,
+    partitioned_convolution,
     get_sound_speed,
     AngleMode, # noqa: F401
     CartesianPoint, # noqa: F401
@@ -21,7 +18,6 @@ from hrir_builder import HInfo
 import rir_builder as rib
 import numpy as np
 from numpy.typing import NDArray
-import scipy
 from concurrent.futures import ThreadPoolExecutor
 import time
 
@@ -30,35 +26,14 @@ MAX_TRANSITION_SAMPLES = 512
 SOFT_CLIP_SCALE = 1.0 / 0.707
 BUFFER_MAX_SIZE = 88200
 
-class SmoothedConvolution():
-
-    @staticmethod
-    def apply_intermediate(x: NDArray[np.float64], prev_kernel: NDArray[np.float64]|None, curr_kernel: NDArray[np.float64], transition_length: int) -> NDArray[np.float64]:
-        if prev_kernel is None:
-            return scipy.signal.fftconvolve(x, curr_kernel, mode="full")
-
-        ksize = max(prev_kernel.size, curr_kernel.size)
-        total_size = x.size + ksize - 1
-        prev_kernel = np.pad(prev_kernel, (0, ksize - prev_kernel.size), mode="constant")
-        kernel_padded = np.pad(curr_kernel, (0, ksize - curr_kernel.size), mode="constant")
-
-        transition_length = min(transition_length, total_size)
-        smoothed = intermediate_segment(x=x, k1=prev_kernel, k2=kernel_padded, ksize=ksize, tlength=transition_length)
-        if transition_length < x.size:
-            rest_part = scipy.signal.fftconvolve(x[transition_length:], kernel_padded, mode="full")
-            smoothed[transition_length:transition_length + rest_part.size] += rest_part
-        return smoothed
-
 class HybriParams():
     def __init__(
         self,
         hrir_database_path: str,
         rir_database_path: str | None,
         coord_mode: CoordMode,
-        interp_domain: InterpolationDomain,
-        build_mode: BuildMode,
         chunk_size: int = 1024,
-        interpolation_neighs: int = 3,
+        interpolation_neighs: int = 2,
         sample_rate: float = 44100,
         gamma: float = 1.0
     ) -> None:
@@ -74,10 +49,6 @@ class HybriParams():
             path to RIRs .h5 database. If null IR will not applied
         coord_mode : CoordMode
             coordinates mode (see CoordMode)
-        interp_domain : InterpDomain
-            HRIRs interpolation domain (see InterpolationDomain)
-        build_mode : BuildMode
-            HRIRs interpolation method
         chunk_size : int
             chunk size in samples for real-time buffering overlap and save. by default, 1024
         interpolation_neighs : int
@@ -89,8 +60,6 @@ class HybriParams():
         self.hrir_database_path = hrir_database_path
         self.rir_database_path = rir_database_path
         self.coord_mode = coord_mode
-        self.interpolation_domain = interp_domain
-        self.build_mode = build_mode
         self.chunk_size = chunk_size
         self.interpolation_neighs = interpolation_neighs
         self.fs = sample_rate
@@ -106,7 +75,7 @@ class RTOverlapSaveBufferConvolution():
         self.transition_size = int(chunk * TRANSITION_FACTOR) if chunk < 2048 else MAX_TRANSITION_SAMPLES
 
     def process(self, x: NDArray[np.float64], kernel: NDArray[np.float64]) -> NDArray[np.float64]:
-        convolution = SmoothedConvolution.apply_intermediate(x=x, prev_kernel=self.pkernel, curr_kernel=kernel, transition_length=self.transition_size)
+        convolution = partitioned_convolution(x=x, prev_kernel=self.pkernel, curr_kernel=kernel, transition_length=self.transition_size)
         self.pkernel = kernel.copy()
 
         convolution[:self.chunk] += self.buffer[:self.chunk]
@@ -140,7 +109,6 @@ class Hybrizone():
         self.hrir_builder = hrb.HRIRBuilder(
             hrir_database=params.hrir_database_path,
             mode=params.coord_mode,
-            interp_domain=params.interpolation_domain,
             gamma=params.gamma
         )
 
@@ -301,7 +269,7 @@ class Hybrizone():
 
         """
 
-        return self.hrir_builder.build_hrir(hrirs_info=hrirs, method=self.__params.build_mode)
+        return self.hrir_builder.build_hrir(hrirs_info=hrirs)
 
     # --- END HRIR SECTION ---
 

@@ -3,19 +3,23 @@ from numpy.typing import NDArray
 from scipy.interpolate import interp1d
 from enum import Enum
 import hashlib
+import scipy.signal as scg
 from numba import njit
 
+# --- CONSTANTS ---
 HEAD_RADIUS = 0.0875 # metri
 NFREQS = 256 # n freqs for multiband filter
-GAMMA = 0.7 # exponent in distance perception
 ETA = HEAD_RADIUS + 0.001 # minimum distance threshold
-# ETA = 0.001 # minimum distance threshold
 MAX_DELAY_SEC = 1 # max delay per sample
+
 SLEW_RATE = 0.01 # smooth fractional delay
+
 P_REF = 101325.0
 T0 = 293.15
+
 INTERNAL_KERNEL_TRANSITION = 0.003 # in sec.
 MAX_DISTANCE_TRANSITION = 0.5
+
 LRU_CAPACITY = 4096
 
 HOT_GAMMA = 1.40
@@ -35,16 +39,6 @@ class CoordMode(Enum):
 class AngleMode(Enum):
     RADIANS = 0
     DEGREE = 1
-
-class BuildMode(Enum):
-    INVERSE_DISTANCE = 1
-    LINEAR_INVERSE_DISTANCE = 2
-    LINEAR = 3
-    SLERPL = 4
-
-class InterpolationDomain(Enum):
-    TIME = 0
-    FREQUENCY = 1
 
 class CartesianPoint():
     def __init__(self, x: float, y: float, z: float):
@@ -271,6 +265,22 @@ class RBuilded():
         self.freqs = freqs
         self.integr = integr
 
+def partitioned_convolution(x: NDArray[np.float64], prev_kernel: NDArray[np.float64]|None, curr_kernel: NDArray[np.float64], transition_length: int) -> NDArray[np.float64]:
+    if prev_kernel is None:
+        return scg.fftconvolve(x, curr_kernel, mode="full")
+
+    ksize = max(prev_kernel.size, curr_kernel.size)
+    total_size = x.size + ksize - 1
+    prev_kernel = np.pad(prev_kernel, (0, ksize - prev_kernel.size), mode="constant")
+    kernel_padded = np.pad(curr_kernel, (0, ksize - curr_kernel.size), mode="constant")
+
+    transition_length = min(transition_length, total_size)
+    smoothed = intermediate_segment(x=x, k1=prev_kernel, k2=kernel_padded, ksize=ksize, tlength=transition_length)
+    if transition_length < x.size:
+        rest_part = scg.fftconvolve(x[transition_length:], kernel_padded, mode="full")
+        smoothed[transition_length:transition_length + rest_part.size] += rest_part
+    return smoothed
+
 @njit(cache=True)
 def intermediate_segment(x: NDArray[np.float64], k1: NDArray[np.float64], k2: NDArray[np.float64], ksize: int, tlength: int) -> NDArray[np.float64]:
     segment = np.zeros(x.size + ksize - 1, dtype=np.float64)
@@ -355,7 +365,6 @@ class LRUCache[T]():
         else:
             return None
 
-
 def get_sound_speed(temp_celsius: float, rh: float, pres_pa: float) -> float: # sqrt(gamma * P / p)
     kelv = temp_celsius + 273.15
     p_sat = 6.1078 * pow(10, 7.5 * temp_celsius / (temp_celsius + 237.3)) * 100.0
@@ -364,6 +373,9 @@ def get_sound_speed(temp_celsius: float, rh: float, pres_pa: float) -> float: # 
     c = np.sqrt(HOT_GAMMA * pres_pa / rho)    
     return c
     
+# ===================================
+# ===================================
+# ===================================
 
 class LinearTrajectory():
     def __init__(self, cpa: NDArray[np.float32], direction: NDArray[np.float32]) -> None:
@@ -400,7 +412,14 @@ class LinearTrajectory():
 
 class ParametricTrajectory():
     @staticmethod
-    def get_circular_points(omega: NDArray[np.float32], t: NDArray[np.float32], radius: NDArray[np.float32], start_elevation: float, vertical_vel: NDArray[np.float32]) -> tuple[list[PolarPoint], list[CartesianPoint]]:
+    def get_circular_points(
+        omega: NDArray[np.float32], 
+        t: NDArray[np.float32], 
+        radius: NDArray[np.float32], 
+        start_elevation: float, 
+        vertical_vel: NDArray[np.float32]
+    ) -> tuple[list[PolarPoint], list[CartesianPoint]]:
+        
         x = radius * np.cos(omega * t)
         y = radius * np.sin(omega * t)
         z = start_elevation + vertical_vel * t

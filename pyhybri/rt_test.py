@@ -6,9 +6,7 @@ from hybri import (
     AirData,
     AngleMode, # noqa: F401
     CoordMode,
-    BuildMode,
     CurveMode,
-    InterpolationDomain,
     CartesianPoint, # noqa: F401
     LinearTrajectory,
     ParametricTrajectory,
@@ -26,6 +24,13 @@ import pygame
 HRIR_PATH = "/Users/pm/AcaHub/Coding/BinauralSpatial/data/HRIR-KEMAR_DATASET.h5"
 RIR_PATH = "/Users/pm/AcaHub/Coding/BinauralSpatial/data/RIR-MIT_SURVEY.h5"
 AUDIO_PATH = "/Users/pm/AcaHub/Coding/BinauralSpatial/audio_examples"
+
+
+USE_PYGAME = False
+
+class Traj(Enum):
+    LINEAR = 1,
+    CIRCULAR = 2
 
 class AudioExample(Enum):
     HELICOPTER1 = 1,
@@ -71,7 +76,11 @@ def load_audio_example(audio: AudioExample):
     s = wave.open(path_to_example, "r")
     return s
 
+<<<<<<< HEAD
 CHUNK = 2048
+=======
+CHUNK = 4096
+>>>>>>> pyclear
 SR = 44100
 CHANNELS = 2
 
@@ -79,20 +88,26 @@ PARAMS = HybriParams(
         hrir_database_path=HRIR_PATH,
         rir_database_path=RIR_PATH,
         coord_mode=CoordMode.REGULAR,
-        interp_domain=InterpolationDomain.FREQUENCY,
-        build_mode=BuildMode.SLERPL,
         chunk_size=CHUNK,
         interpolation_neighs=2,
         sample_rate=SR,
-        gamma=1.2
+        gamma=1
 )
 
-pygame.init()
+if USE_PYGAME:
+    pygame.init()
 
 # main function
 def main() -> None:
+<<<<<<< HEAD
     SCREEN = pygame.display.set_mode((1280, 720))
     clock = pygame.time.Clock()
+=======
+
+    if USE_PYGAME:
+        SCREEN = pygame.display.set_mode((1280, 720))
+        clock = pygame.time.Clock()
+>>>>>>> pyclear
 
     # AUDIO_SIGNAL = load_audio_example(audio=AudioExample.FOOTSTEP)
     # frame_block = AUDIO_SIGNAL.readframes(CHUNK)
@@ -101,7 +116,7 @@ def main() -> None:
     AURALIZER = Hybrizone(params=PARAMS)
 
     # set air conditions
-    air_conditions = AirData(temperature=20, humidity=0.5, pressure=101325.0)
+    air_conditions = AirData(temperature=50, humidity=0.75, pressure=101325.0)
     AURALIZER.imposed_air_conditions(air_data=air_conditions)
 
     # pass the rirs
@@ -109,9 +124,17 @@ def main() -> None:
 
     # audio engine
     PORTAUDIO = pa.PyAudio()
-    stream = PORTAUDIO.open(format=pa.paFloat32, channels=CHANNELS, rate=SR, output=True, frames_per_buffer=CHUNK)
+    stream = PORTAUDIO.open(
+        format=pa.paFloat32,
+        channels=CHANNELS,
+        rate=SR,
+        output=True,
+        frames_per_buffer=CHUNK
+    )
+
     stream.start_stream()
 
+<<<<<<< HEAD
     # IN-HEAD
     # distances = np.abs(np.linspace(1, -1, nblocks, endpoint=True)) * max_distance
     # azimuths = np.zeros(nblocks)
@@ -125,10 +148,13 @@ def main() -> None:
     # elevations[:nblocks // 2 + 1] = FIXED_PHI
     # elevations[nblocks // 2 + 1:] = -FIXED_PHI # invert ele to back
 
+=======
+>>>>>>> pyclear
     AUDIO_SIGNAL = load_audio_example(audio=AudioExample.HELICOPTER1)
     frame_block = AUDIO_SIGNAL.readframes(CHUNK)
     nblocks = AUDIO_SIGNAL.getnframes() // CHUNK
 
+<<<<<<< HEAD
     MAX_DISTANCE = 200
     example_mode = "linear_traj"
 
@@ -136,6 +162,16 @@ def main() -> None:
     match example_mode:
         case "linear_traj":
             cpa = np.array([0.0, 0.0, 3.0]) # closest point (left Y pos, in front X pos, up Z pos)
+=======
+    MAX_DISTANCE = 100
+    GAIN = 3
+    example_mode = Traj.LINEAR
+
+    points_pol, points_car = None, None
+    match example_mode:
+        case Traj.LINEAR:
+            cpa = np.array([1.0, 0.0, -3.0]) # closest point (left Y pos, in front X pos, up Z pos)
+>>>>>>> pyclear
             direction = np.array([-1.0, 0.0, 0.0])
 
             linear_direction_info(direction=direction)
@@ -148,49 +184,56 @@ def main() -> None:
 
             linear_traj = LinearTrajectory(cpa=cpa, direction=direction)
             points_pol, points_car = linear_traj.get_points(distances=distances)
-        case "circular_traj":
+
+        case Traj.CIRCULAR:
             omega = np.linspace(0.1, 10, nblocks, endpoint=True)
             times = np.linspace(0, nblocks * CHUNK / SR, nblocks, endpoint=True)
             distances_circular = np.linspace(10, 1, nblocks, endpoint=True)
-            start_elevelation_pos = 10
-            vertical_vel = np.zeros(nblocks) - 1
+            start_elevelation_pos = 0
+            vertical_vel = np.zeros(nblocks) # - 1
             # vertical_vel[:nblocks // 2 + 1] = 0.5
             # vertical_vel[nblocks // 2 + 1:] = -0.5
 
             points_pol, points_car = ParametricTrajectory.get_circular_points(omega=omega, t=times, radius=distances_circular, start_elevation=start_elevelation_pos, vertical_vel=vertical_vel)
 
     SCALE = 50
+<<<<<<< HEAD
     GAIN = 2
+=======
+>>>>>>> pyclear
     RUN = True
 
     print(f"[INFO] Sound speed: {AURALIZER.sound_speed:.5f} m/s")
 
     index = 0
     while frame_block != b'':
+<<<<<<< HEAD
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 RUN = False
+=======
+>>>>>>> pyclear
 
-        SCREEN.fill("black")
+        if USE_PYGAME:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    RUN = False
+
+            SCREEN.fill("black")
 
         try:
             if index < nblocks:
-            #     current_rho = distances[index]
-            #     current_phi = elevations[index]
-            #     current_theta = azimuths[index]
                 pos = points_pol[index]
                 cart = points_car[index]
             else:
-            #     current_rho = distances[-1]
-            #     current_phi = elevations[-1]
-            #     current_theta = azimuths[-1]
                 pos = points_pol[-1]
                 cart = points_car[-1]
 
             frame = np.frombuffer(frame_block, dtype=np.int16) # mono
             frame = (frame / 32768.0) * GAIN
 
+<<<<<<< HEAD
             # print(f"rho: [{pos.rho}], phi: [{pos.phi}], theta: [{pos.theta}]")
 
             depth = cart.x + 1e-12
@@ -204,6 +247,22 @@ def main() -> None:
             print(f"x: [{x_screen}], y: [{y_screen}], DEPTH: [{radius}]")
 
             pygame.draw.circle(SCREEN, "white", center=(x_screen, y_screen), radius=radius)
+=======
+            print(f"rho: [{pos.rho}], phi: [{pos.phi}], theta: [{pos.theta}]")
+
+
+
+            if USE_PYGAME:
+                depth = cart.x + 1e-12
+                world_x = cart.y
+                world_y = cart.z
+                x_screen = (-world_x * SCALE / depth) + SCREEN.get_width() / 2
+                y_screen = SCREEN.get_height() / 2 - (world_y * SCALE / depth)
+
+                radius = 1 * SCALE / depth
+                print(f"x: [{x_screen}], y: [{y_screen}], DEPTH: [{radius}]")
+                pygame.draw.circle(SCREEN, "white", center=(x_screen, y_screen), radius=radius)
+>>>>>>> pyclear
 
             # pos = PolarPoint(rho=current_rho, phi=current_phi, theta=current_theta, opt=AngleMode.DEGREE)
             AURALIZER.set_position(position=pos)
@@ -220,8 +279,11 @@ def main() -> None:
 
             frame_block = AUDIO_SIGNAL.readframes(CHUNK)
             index += 1
-            pygame.display.flip()
-            clock.tick(60)
+
+            if USE_PYGAME:
+                pygame.display.flip()
+                clock.tick(60)
+
         except KeyboardInterrupt:
             RUN = False
             AURALIZER.close()
@@ -237,7 +299,12 @@ def main() -> None:
     PORTAUDIO.terminate()
     AUDIO_SIGNAL.close()
 
+<<<<<<< HEAD
     pygame.quit()
+=======
+    if USE_PYGAME:
+        pygame.quit()
+>>>>>>> pyclear
 
 # [MAIN PROGRAM]: if the module is being run as the main program, it calls the "main()" function
 if __name__ == "__main__":

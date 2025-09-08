@@ -1,8 +1,7 @@
 import numpy as np
 from numpy.typing import NDArray
 import h5py
-import hashlib
-
+import hashlib 
 import scipy.fft
 import scipy.signal
 from hybri_tools import ISO9613Filter, GeometricAttenuation, AirData, ETA, CurveMode, RData, cross_fade, LRUCache
@@ -60,7 +59,7 @@ class RIRMorpha():
         self.cache_data = { "r1": None, "r2": None, "sf": None }
         
         self.__prev_dist = None
-        self.sound_speed = None
+        self.sound_speed = None # maybe, it might be useful
 
     def close(self) -> None:
         self.dataset.close()       
