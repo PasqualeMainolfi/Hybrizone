@@ -51,7 +51,7 @@ If you prefer to use the C++ version, navigate to the `/chybri` directory. In `t
 Then, compile the project using:
 
 ```shell
-make build
+make
 make run
 ```
 
