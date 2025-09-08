@@ -41,12 +41,12 @@ void lerp(double* x, double* y, double* xnew, double* yout, size_t xsize, size_t
     }
 }
 
-double woodworth_itd3d(const PolarPoint& p) {
+double woodworth_itd3d(const PolarPoint& p, double sound_speed) {
     double sin_theta = sin(-p.theta);
     double cos_phi = cos(p.phi);
     double svalue = p.rho * p.rho + HEAD_RADIUS * HEAD_RADIUS - 2 * HEAD_RADIUS * p.rho * sin_theta * cos_phi;
     double num = p.rho + HEAD_RADIUS * sin_theta * cos_phi - sqrt(svalue);
-    return num / SOUND_SPEED;
+    return num / sound_speed;
 }
 
 SpatialNeighs spatial_match(CartesianPoint* target, HrirDatasetRead* dataset) {

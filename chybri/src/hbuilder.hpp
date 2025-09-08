@@ -116,12 +116,15 @@ public:
             this->f_shift_itd[i] = -TWOPI * f;
         }
 
+        this->sound_speed = 0.0;
+
     }
 
-    void set_air_condition(AirData* air_data) {
+    void set_air_condition(AirData* air_data, double _sound_speed) {
         this->iso9613 = new ISO9613Filter(air_data, this->fs);
         this->db_attenuation.resize(NFREQS);
         this->iso9613->get_attenuation_air_absorption(this->db_attenuation.data());
+        this->sound_speed = _sound_speed;
     }
 
     ~HBuilder() {
@@ -241,6 +244,7 @@ private:
     std::vector<double> cross_fade_coeff_a;
     std::vector<double> cross_fade_coeff_b;
     std::vector<double> f_shift_itd;
+    double sound_speed;
 
     void hslerp() {
         CartesianPoint trg = this->hinfo->target.get_cartesian();
@@ -248,7 +252,7 @@ private:
 
         double interpolated_itd;
         if (this->hinfo->target.rho < this->dataset->get_source_distance()) {
-            interpolated_itd = woodworth_itd3d(this->hinfo->target);
+            interpolated_itd = woodworth_itd3d(this->hinfo->target, this->sound_speed);
         } else {
             interpolated_itd = this->hinfo->h1->itd * s_coeffs.a + this->hinfo->h2->itd * s_coeffs.b;
         }
@@ -299,8 +303,8 @@ private:
         std::vector<double> left_temp = this->current_left_channel;
         std::vector<double> right_temp = this->current_right_channel;
 
-        this->geometric_attenuation->apply_fractional_delay(left_temp.data(), this->current_left_channel.data(), rho, 0, this->hsize);
-        this->geometric_attenuation->apply_fractional_delay(right_temp.data(), this->current_right_channel.data(), rho, 1, this->hsize);
+        this->geometric_attenuation->apply_fractional_delay(left_temp.data(), this->current_left_channel.data(), rho, 0, this->hsize, this->sound_speed);
+        this->geometric_attenuation->apply_fractional_delay(right_temp.data(), this->current_right_channel.data(), rho, 1, this->hsize, this->sound_speed);
 
         double rdist = rho - std::max(this->dataset->get_source_distance(), ETA);
 

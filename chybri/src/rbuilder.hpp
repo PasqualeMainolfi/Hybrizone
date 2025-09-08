@@ -49,6 +49,8 @@ public:
         }
 
         this->fft_plan_cache = new LRUCache(FFT_CACHE_CAPACITY, CacheType::FFT);
+
+        this->sound_speed = 0.0;
     }
 
     ~RBuilder() {
@@ -59,10 +61,11 @@ public:
         delete this->fft_plan_cache;
     }
 
-    void set_air_condition(AirData* air_data) {
+    void set_air_condition(AirData* air_data, double _sound_speed) {
         this->iso9613 = new ISO9613Filter(air_data, this->fs);
         this->db_attenuation.resize(NFREQS);
         this->iso9613->get_attenuation_air_absorption(this->db_attenuation.data());
+        this->sound_speed = _sound_speed;
     }
 
     void set_rirs(size_t index_a, size_t index_b, double smooth_factor) {
@@ -196,6 +199,7 @@ private:
     std::vector<double> cross_fade_coeff_a;
     std::vector<double> cross_fade_coeff_b;
     LRUCache* fft_plan_cache;
+    double sound_speed;
 
     void get_spectral_envelope(fftw_complex* x, double* y, size_t frame_size, size_t fft_size, double smooth_factor) {
         fftw_complex* db = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * fft_size);

@@ -19,7 +19,6 @@
 #define T_ZERO (293.15)
 #define NFREQS (256)
 #define MAX_DELAY_SEC (1.0)
-#define SOUND_SPEED (343.3)
 #define SLEW_RATE (0.01)
 #define HEAD_RADIUS (0.0875)
 #define ETA (HEAD_RADIUS + 0.01)
@@ -35,6 +34,9 @@
 #define SOFT_CLIP_FACTOR (1.0 / 0.707)
 #define MAX_OSA_BUFFER_SIZE (22050)
 #define EPSILON (1e-9)
+#define R_AIR (287.05)
+#define R_V (461.5)
+#define HOT_GAMMA (461.5)
 
 
 inline void from_interleaved_to_single(double* interleaved, double* a, double* b, size_t out_size) {
@@ -98,6 +100,15 @@ inline void unwrap_phase(double* x, size_t half_size) {
 
         x[current_idx] += offset_r;
     }
+}
+
+inline double get_sound_speed(double temp_celsius, double rh, double pres_pa) {
+    double kelv = temp_celsius + 273.15;
+    double p_sat = 6.1078 * pow(10, 7.5 * temp_celsius / (temp_celsius + 237.3)) * 100.0;
+    double p_v = rh * p_sat;
+    double rho = (pres_pa - p_v) / (R_AIR * kelv) + p_v / (R_V * kelv);
+    double c = sqrt(HOT_GAMMA * pres_pa / rho);
+    return c;
 }
 
 enum ConvMode
@@ -397,13 +408,15 @@ public:
   double kelvin;
   double rh;
   double p_atm;
+  double celsius;
+  double pres_pa;
 
   AirData()
-  : kelvin(293.15), rh(50.0), p_atm(1.0)
+  : kelvin(293.15), rh(50.0), p_atm(1.0), celsius(20), pres_pa(P_REF)
   { }
 
   AirData(double temperature, double r_humidity, double pressure)
-  : rh(r_humidity)
+  : rh(r_humidity), celsius(temperature), pres_pa(pressure)
   {
       this->kelvin = temperature + 273.15;
       this->p_atm = pressure / P_REF;
@@ -413,7 +426,7 @@ public:
 // interpolator
 void lerp(double* x, double* y, double* xnew, double* yout, size_t xsize, size_t xnew_size, bool fill_value);
 // itd calculation
-double woodworth_itd3d(const PolarPoint& p);
+double woodworth_itd3d(const PolarPoint& p, double sound_speed);
 
 enum FFT_DIRECTION
 {
@@ -882,8 +895,8 @@ public:
         this->delayed_indexes.resize(length);
     }
 
-    void apply_fractional_delay(double* frame, double* frame_out, double distance, int channel, size_t frame_size) {
-        double delay = distance * this->sample_rate / SOUND_SPEED;
+    void apply_fractional_delay(double* frame, double* frame_out, double distance, int channel, size_t frame_size, double sound_speed) {
+        double delay = distance * this->sample_rate / sound_speed;
         double delta_delay = delay - this->current_delay[channel];
         delta_delay = std::max(-SLEW_RATE, std::min(SLEW_RATE, delta_delay));
         this->current_delay[channel] += delta_delay;

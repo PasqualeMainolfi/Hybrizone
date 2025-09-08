@@ -36,6 +36,7 @@ class Hybrizone
 public:
     HBuilder* hbuilder;
     RBuilder* rbuilder;
+    double sound_speed;
 
     Hybrizone(const char* hrir_dataset_path, const char* rir_dataset_path, size_t chunk_size, double sample_rate)
     : chunk(chunk_size), fs(sample_rate)
@@ -66,6 +67,8 @@ public:
         }
 
         this->mono = std::vector<double>(this->chunk, 0.0);
+
+        this->sound_speed = 0.0;
     }
 
     ~Hybrizone() {
@@ -82,8 +85,9 @@ public:
     }
 
     void set_air_condition(AirData air_data) {
-        this->hbuilder->set_air_condition(&air_data);
-        if (this->rbuilder) this->rbuilder->set_air_condition(&air_data);
+        this->sound_speed = get_sound_speed(air_data.celsius, air_data.rh, air_data.pres_pa);
+        this->hbuilder->set_air_condition(&air_data, this->sound_speed);
+        if (this->rbuilder) this->rbuilder->set_air_condition(&air_data, this->sound_speed);
     }
 
     void set_rirs(size_t index_a, size_t index_b, double smooth_factor) {
