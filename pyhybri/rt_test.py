@@ -90,16 +90,16 @@ PARAMS = HybriParams(
         gamma=1
 )
 
-if USE_PYGAME: 
+if USE_PYGAME:
     pygame.init()
 
 # main function
 def main() -> None:
-    
+
     if USE_PYGAME:
         SCREEN = pygame.display.set_mode((1280, 720))
         clock = pygame.time.Clock()
-    
+
     # AUDIO_SIGNAL = load_audio_example(audio=AudioExample.FOOTSTEP)
     # frame_block = AUDIO_SIGNAL.readframes(CHUNK)
 
@@ -116,13 +116,13 @@ def main() -> None:
     # audio engine
     PORTAUDIO = pa.PyAudio()
     stream = PORTAUDIO.open(
-        format=pa.paFloat32, 
-        channels=CHANNELS, 
-        rate=SR, 
-        output=True, 
+        format=pa.paFloat32,
+        channels=CHANNELS,
+        rate=SR,
+        output=True,
         frames_per_buffer=CHUNK
     )
-    
+
     stream.start_stream()
 
     AUDIO_SIGNAL = load_audio_example(audio=AudioExample.HELICOPTER1)
@@ -142,14 +142,14 @@ def main() -> None:
             linear_direction_info(direction=direction)
 
             distances = np.linspace(-MAX_DISTANCE / 2, MAX_DISTANCE / 2, nblocks, endpoint=True)
-            
+
             space_step = MAX_DISTANCE / (nblocks - 1)
-            sec = space_step / (CHUNK / SR) 
+            sec = space_step / (CHUNK / SR)
             print(f"[VELOCITY] = {sec:.3f} m/s")
-            
+
             linear_traj = LinearTrajectory(cpa=cpa, direction=direction)
             points_pol, points_car = linear_traj.get_points(distances=distances)
-            
+
         case Traj.CIRCULAR:
             omega = np.linspace(0.1, 10, nblocks, endpoint=True)
             times = np.linspace(0, nblocks * CHUNK / SR, nblocks, endpoint=True)
@@ -163,12 +163,12 @@ def main() -> None:
 
     SCALE = 50
     RUN = True
-    
+
     print(f"[INFO] Sound speed: {AURALIZER.sound_speed:.5f} m/s")
-    
+
     index = 0
     while frame_block != b'':
-        
+
         if USE_PYGAME:
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
@@ -188,16 +188,16 @@ def main() -> None:
             frame = (frame / 32768.0) * GAIN
 
             print(f"rho: [{pos.rho}], phi: [{pos.phi}], theta: [{pos.theta}]")
-            
-            
-            
+
+
+
             if USE_PYGAME:
                 depth = cart.x + 1e-12
                 world_x = cart.y
                 world_y = cart.z
                 x_screen = (-world_x * SCALE / depth) + SCREEN.get_width() / 2
                 y_screen = SCREEN.get_height() / 2 - (world_y * SCALE / depth)
-                
+
                 radius = 1 * SCALE / depth
                 print(f"x: [{x_screen}], y: [{y_screen}], DEPTH: [{radius}]")
                 pygame.draw.circle(SCREEN, "white", center=(x_screen, y_screen), radius=radius)
@@ -217,11 +217,11 @@ def main() -> None:
 
             frame_block = AUDIO_SIGNAL.readframes(CHUNK)
             index += 1
-            
+
             if USE_PYGAME:
                 pygame.display.flip()
                 clock.tick(60)
-                
+
         except KeyboardInterrupt:
             RUN = False
             AURALIZER.close()
@@ -236,7 +236,7 @@ def main() -> None:
     stream.close()
     PORTAUDIO.terminate()
     AUDIO_SIGNAL.close()
-    
+
     if USE_PYGAME:
         pygame.quit()
 
