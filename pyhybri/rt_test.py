@@ -71,7 +71,7 @@ def load_audio_example(audio: AudioExample):
     s = wave.open(path_to_example, "r")
     return s
 
-CHUNK = 1024
+CHUNK = 2048
 SR = 44100
 CHANNELS = 2
 
@@ -93,7 +93,7 @@ pygame.init()
 def main() -> None:
     SCREEN = pygame.display.set_mode((1280, 720))
     clock = pygame.time.Clock()
-    
+
     # AUDIO_SIGNAL = load_audio_example(audio=AudioExample.FOOTSTEP)
     # frame_block = AUDIO_SIGNAL.readframes(CHUNK)
 
@@ -125,27 +125,27 @@ def main() -> None:
     # elevations[:nblocks // 2 + 1] = FIXED_PHI
     # elevations[nblocks // 2 + 1:] = -FIXED_PHI # invert ele to back
 
-    AUDIO_SIGNAL = load_audio_example(audio=AudioExample.HELICOPTER2)
+    AUDIO_SIGNAL = load_audio_example(audio=AudioExample.HELICOPTER1)
     frame_block = AUDIO_SIGNAL.readframes(CHUNK)
     nblocks = AUDIO_SIGNAL.getnframes() // CHUNK
 
-    MAX_DISTANCE = 30
-    example_mode = "circular_traj"
+    MAX_DISTANCE = 200
+    example_mode = "linear_traj"
 
     points_pol, points_car = None, None
     match example_mode:
         case "linear_traj":
-            cpa = np.array([1.0, 0.0, -3.0]) # closest point (left Y pos, in front X pos, up Z pos)
-            direction = np.array([0.0, 1.0, -3.0])
+            cpa = np.array([0.0, 0.0, 3.0]) # closest point (left Y pos, in front X pos, up Z pos)
+            direction = np.array([-1.0, 0.0, 0.0])
 
             linear_direction_info(direction=direction)
 
             distances = np.linspace(-MAX_DISTANCE / 2, MAX_DISTANCE / 2, nblocks, endpoint=True)
-            
+
             space_step = MAX_DISTANCE / (nblocks - 1)
-            sec = space_step / (CHUNK / SR) 
+            sec = space_step / (CHUNK / SR)
             print(f"[VELOCITY] = {sec:.3f} m/s")
-            
+
             linear_traj = LinearTrajectory(cpa=cpa, direction=direction)
             points_pol, points_car = linear_traj.get_points(distances=distances)
         case "circular_traj":
@@ -160,14 +160,14 @@ def main() -> None:
             points_pol, points_car = ParametricTrajectory.get_circular_points(omega=omega, t=times, radius=distances_circular, start_elevation=start_elevelation_pos, vertical_vel=vertical_vel)
 
     SCALE = 50
-    GAIN = 1
+    GAIN = 2
     RUN = True
-    
+
     print(f"[INFO] Sound speed: {AURALIZER.sound_speed:.5f} m/s")
-    
+
     index = 0
     while frame_block != b'':
-        
+
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 RUN = False
@@ -192,17 +192,17 @@ def main() -> None:
             frame = (frame / 32768.0) * GAIN
 
             # print(f"rho: [{pos.rho}], phi: [{pos.phi}], theta: [{pos.theta}]")
-            
+
             depth = cart.x + 1e-12
             world_x = cart.y
             world_y = cart.z
-            
+
             x_screen = (-world_x * SCALE / depth) + SCREEN.get_width() / 2
             y_screen = SCREEN.get_height() / 2 - (world_y * SCALE / depth)
-            
+
             radius = 1 * SCALE / depth
             print(f"x: [{x_screen}], y: [{y_screen}], DEPTH: [{radius}]")
-            
+
             pygame.draw.circle(SCREEN, "white", center=(x_screen, y_screen), radius=radius)
 
             # pos = PolarPoint(rho=current_rho, phi=current_phi, theta=current_theta, opt=AngleMode.DEGREE)
@@ -236,7 +236,7 @@ def main() -> None:
     stream.close()
     PORTAUDIO.terminate()
     AUDIO_SIGNAL.close()
-    
+
     pygame.quit()
 
 # [MAIN PROGRAM]: if the module is being run as the main program, it calls the "main()" function
